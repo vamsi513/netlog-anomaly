@@ -57,3 +57,8 @@ def sample_log() -> Path:
 @pytest.fixture
 def malformed_log() -> Path:
     return FIXTURES / "malformed_bgl.log"
+
+
+@pytest.fixture
+def windows_log() -> Path:
+    return FIXTURES / "windows_bgl.log"
