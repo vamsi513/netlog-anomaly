@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "netlog-anomaly"
 version = "0.1.0"
@@ -17,3 +21,8 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+# Put the project root on sys.path so the package and the tests package import
+# the same way under `pytest` as under `python -m pytest`. Without this, bare
+# `pytest` cannot see netlog_anomaly unless the project is installed, which is
+# how CI differed from a local run.
+pythonpath = ["."]
