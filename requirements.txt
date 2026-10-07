@@ -1,0 +1,9 @@
+# Direct dependencies
+psycopg[binary]==3.2.10
+scikit-learn==1.7.2
+numpy==2.3.3
+
+# Transitive, pinned for reproducibility
+joblib==1.6.0
+scipy==1.18.1
+threadpoolctl==3.7.0

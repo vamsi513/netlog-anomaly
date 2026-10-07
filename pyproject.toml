@@ -1,0 +1,19 @@
+[project]
+name = "netlog-anomaly"
+version = "0.1.0"
+description = "ETL and anomaly detection over a public labeled system log dataset"
+requires-python = "==3.13.*"
+
+[tool.setuptools.packages.find]
+include = ["netlog_anomaly*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

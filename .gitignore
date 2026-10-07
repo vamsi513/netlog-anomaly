@@ -1,0 +1,18 @@
+# Data (never committed; fetch with scripts/download_data.sh)
+data/
+*.log
+*.zip
+*.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local env / outputs
+.env
+out/
