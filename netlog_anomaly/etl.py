@@ -16,7 +16,13 @@ from pathlib import Path
 import psycopg
 
 from netlog_anomaly.db import read_sql
-from netlog_anomaly.parser import LogEvent, ParseError, RejectedLine, parse_line
+from netlog_anomaly.parser import (
+    LogEvent,
+    ParseError,
+    RejectedLine,
+    escape_for_storage,
+    parse_line,
+)
 
 STAGE_EVENTS_DDL = """
 CREATE TEMPORARY TABLE stg_log_events (
@@ -69,7 +75,11 @@ def parse_lines(
         try:
             yield parse_line(line, line_no)
         except ParseError as exc:
-            yield RejectedLine(line_no=line_no, reason=exc.reason, raw_line=line.rstrip("\n"))
+            yield RejectedLine(
+                line_no=line_no,
+                reason=exc.reason,
+                raw_line=escape_for_storage(line.rstrip("\n")),
+            )
 
 
 def load_file(

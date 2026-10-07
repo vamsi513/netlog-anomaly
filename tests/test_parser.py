@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from netlog_anomaly.parser import ParseError, mask_message, parse_line, template_id
+from netlog_anomaly.parser import (
+    ParseError,
+    escape_for_storage,
+    mask_message,
+    parse_line,
+    template_id,
+)
 
 NORMAL = (
     "- 1117838570 2005.06.03 R02-M1-N0-C:J12-U11 2005-06-03-15.42.50.363779 "
@@ -64,7 +70,8 @@ def test_runs_of_whitespace_in_message_are_collapsed_in_template() -> None:
         (NORMAL.replace("2005.06.03", "06/03/2005", 1), "bad_date"),
         (NORMAL.replace("2005-06-03-15.42.50.363779", "15:42:50"), "bad_datetime"),
         (NORMAL.replace(" INFO ", " IN-FO "), "unknown_severity"),
-        (NORMAL.replace("instruction", "instruct�ion"), "undecodable_bytes"),
+        (NORMAL.replace("instruction", "instruct\ufffdion"), "undecodable_bytes"),
+        (NORMAL.replace("instruction", "instruct\x00ion"), "nul_byte"),
     ],
 )
 def test_malformed_lines_raise_with_reason(raw: str, reason: str) -> None:
@@ -130,3 +137,14 @@ def test_bglmaster_failure_level_is_accepted() -> None:
     assert event.severity == "FAILURE"
     assert event.is_alert is True
     assert event.component == "BGLMASTER"
+
+
+def test_escape_for_storage_makes_a_nul_line_storable() -> None:
+    raw = "- 1132324504 2005.11.18 UNKNOWN_LOCATION ... com.ibm\x00bgl"
+    escaped = escape_for_storage(raw)
+    assert "\x00" not in escaped
+    assert "\\x00" in escaped
+
+
+def test_escape_for_storage_leaves_ordinary_lines_alone() -> None:
+    assert escape_for_storage(NORMAL) == NORMAL

@@ -82,6 +82,15 @@ class ParseError(ValueError):
         self.reason = reason
 
 
+def escape_for_storage(line: str) -> str:
+    """Make a rejected line storable in a Postgres text column.
+
+    Only NUL is unrepresentable, and it is escaped rather than dropped so the
+    quarantined line still shows what was wrong with it.
+    """
+    return line.replace("\x00", "\\x00")
+
+
 def mask_message(message: str) -> str:
     """Replace the variable parts of a message with placeholder tokens."""
     masked = message
@@ -99,8 +108,14 @@ def parse_line(raw_line: str, line_no: int) -> LogEvent:
     """Parse one raw line, raising ParseError when it is malformed."""
     line = raw_line.rstrip("\n").rstrip("\r")
 
-    if "�" in line:
+    # errors="replace" at decode time turns invalid byte sequences into
+    # U+FFFD, so their presence means the line was not valid UTF-8.
+    if "\ufffd" in line:
         raise ParseError("undecodable_bytes")
+    # Postgres text columns cannot hold NUL at all, so such a line can never
+    # be stored as it stands. The real log contains four of them.
+    if "\x00" in line:
+        raise ParseError("nul_byte")
     if not line.strip():
         raise ParseError("empty_line")
 
