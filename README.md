@@ -179,8 +179,9 @@ rate.
 
 Timings on the same machine: 70.3s to parse and load 4.7M lines and 9.7s to
 build the windows, with under a second to fit and score all three detectors.
-A repeat of the whole run from a clean `git archive` export measured 74.1s and
-9.1s for the same two steps and produced an identical results table. The loaded
+A repeat of the whole run from a clean `git archive` export, in a fresh
+virtual environment built from the pinned requirements, measured 74.5s and 9.2s
+for the same two steps and reproduced the table above value for value. The loaded
 database is about 1.3 GB.
 
 ### Reading these numbers
