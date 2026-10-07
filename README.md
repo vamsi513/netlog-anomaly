@@ -152,8 +152,10 @@ Scores on the **test period only**:
 | z-score baseline (max \|z\| ≥ 2.5065) | 0.2736 | 0.6881 | 0.3915 | 278 | 738 | 126 | 7103 |
 | isolation forest (200 trees, contamination 0.0745) | 0.1851 | 0.1287 | 0.1518 | 52 | 229 | 352 | 7612 |
 
-Timings on the same machine: 70.3s to parse and load 4.7M lines, 9.7s to build
-the windows, under a second to fit and score all three detectors. The loaded
+Timings on the same machine: 70.3s to parse and load 4.7M lines and 9.7s to
+build the windows, with under a second to fit and score all three detectors.
+A repeat of the whole run from a clean `git archive` export measured 74.1s and
+9.1s for the same two steps and produced an identical results table. The loaded
 database is about 1.3 GB.
 
 ### Reading these numbers
