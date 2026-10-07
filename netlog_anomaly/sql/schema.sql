@@ -9,7 +9,10 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
     run_id            BIGSERIAL PRIMARY KEY,
     source_file       TEXT        NOT NULL,
     window_seconds    INTEGER,
-    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- clock_timestamp() rather than now(): now() is fixed for the whole
+    -- transaction, and a load is one transaction, so it would record every
+    -- run as taking no time at all.
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     finished_at       TIMESTAMPTZ,
     lines_read        BIGINT      NOT NULL DEFAULT 0,
     rows_inserted     BIGINT      NOT NULL DEFAULT 0,

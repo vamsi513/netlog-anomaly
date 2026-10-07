@@ -189,7 +189,7 @@ def load_file(
         cur.execute(
             """
             UPDATE ingest_runs
-               SET finished_at = now(), lines_read = %s, rows_inserted = %s,
+               SET finished_at = clock_timestamp(), lines_read = %s, rows_inserted = %s,
                    rows_duplicate = %s, lines_quarantined = %s
              WHERE run_id = %s
             """,

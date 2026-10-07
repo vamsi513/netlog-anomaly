@@ -188,3 +188,16 @@ def test_connections_report_timestamps_in_utc(database_url: str) -> None:
         row = cur.fetchone()
     assert row is not None
     assert row[0] == "UTC"
+
+
+def test_ingest_run_records_a_real_duration(conn: psycopg.Connection, sample_log: Path) -> None:
+    # A load is a single transaction, so now() would be identical at both ends
+    # and every run would look instantaneous.
+    stats = load_file(conn, sample_log)
+    elapsed = scalar(
+        conn,
+        "SELECT finished_at - started_at FROM ingest_runs WHERE run_id = %s",
+        (stats.run_id,),
+    )
+    assert elapsed is not None
+    assert elapsed.total_seconds() > 0
