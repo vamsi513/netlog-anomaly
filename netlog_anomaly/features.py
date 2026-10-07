@@ -8,7 +8,8 @@ windows alone rather than from the whole dataset.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 import numpy as np
@@ -18,6 +19,19 @@ BASE_FEATURES: tuple[str, ...] = (
     "event_count",
     "distinct_nodes",
     "distinct_templates",
+    "info_count",
+    "warning_count",
+    "error_count",
+    "severe_count",
+    "fatal_count",
+    "failure_count",
+    "error_rate",
+)
+
+# Every base feature computed from the severity column. error_rate belongs here
+# too: it is a ratio of severity counts, so keeping it would leave the severity
+# signal in a variant that claims not to use it.
+SEVERITY_FEATURES: tuple[str, ...] = (
     "info_count",
     "warning_count",
     "error_count",
@@ -53,6 +67,30 @@ class Split:
 
     def column(self, name: str) -> int:
         return self.feature_names.index(name)
+
+
+def drop_features(split: Split, names: Iterable[str]) -> Split:
+    """The same split with the named feature columns removed.
+
+    Rows, labels, timestamps and the split boundary are untouched, so a variant
+    built this way is comparable with the full one on exactly the same windows.
+    """
+    unwanted = set(names)
+    unknown = sorted(unwanted - set(split.feature_names))
+    if unknown:
+        raise ValueError(f"not features of this split: {', '.join(unknown)}")
+
+    keep = [i for i, name in enumerate(split.feature_names) if name not in unwanted]
+    kept_names = tuple(split.feature_names[i] for i in keep)
+    return replace(
+        split,
+        feature_names=kept_names,
+        x_train=split.x_train[:, keep],
+        x_test=split.x_test[:, keep],
+        template_features=tuple(
+            name for name in split.template_features if name in set(kept_names)
+        ),
+    )
 
 
 def _fetch_base(

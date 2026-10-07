@@ -8,13 +8,21 @@ from urllib.parse import quote
 import psycopg
 import pytest
 
+from netlog_anomaly.detect import severity_rule
 from netlog_anomaly.etl import load_file, refresh_windows
 from netlog_anomaly.evaluate import evaluate, format_report
+from netlog_anomaly.features import SEVERITY_FEATURES
 from netlog_anomaly.pipeline import main
 from tests.conftest import TEST_SCHEMA
 from tests.test_features import BASE_EPOCH, write_log
 
-DETECTORS = ("severity rule", "z-score baseline", "isolation forest")
+DETECTOR_LABELS = (
+    "severity rule",
+    "z-score baseline (all features)",
+    "isolation forest (all features)",
+    "z-score baseline (severity-free)",
+    "isolation forest (severity-free)",
+)
 
 
 def mixed_lines(n_windows: int = 40) -> list[tuple[int, str, str, str]]:
@@ -38,9 +46,50 @@ def populated(conn: psycopg.Connection, tmp_path: Path) -> psycopg.Connection:
     return conn
 
 
-def test_every_detector_is_scored(populated: psycopg.Connection) -> None:
+def test_every_detector_and_variant_is_scored(populated: psycopg.Connection) -> None:
     evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
-    assert tuple(result.name for result in evaluation.results) == DETECTORS
+    assert tuple(result.label for result in evaluation.results) == DETECTOR_LABELS
+
+
+def test_learned_detectors_are_scored_on_both_variants(
+    populated: psycopg.Connection,
+) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    for name in ("z-score baseline", "isolation forest"):
+        variants = {r.variant for r in evaluation.results if r.name == name}
+        assert variants == {"all features", "severity-free"}
+
+
+def test_the_severity_free_variant_drops_the_severity_columns(
+    populated: psycopg.Connection,
+) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    assert set(evaluation.reduced.feature_names).isdisjoint(SEVERITY_FEATURES)
+    assert len(evaluation.reduced.feature_names) == len(evaluation.split.feature_names) - len(
+        SEVERITY_FEATURES
+    )
+
+
+def test_both_variants_are_scored_on_the_same_windows(
+    populated: psycopg.Connection,
+) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    supports = {r.scores.support for r in evaluation.results}
+    totals = {r.scores.total for r in evaluation.results}
+    assert len(supports) == 1
+    assert len(totals) == 1
+
+
+def test_severity_rule_cannot_run_on_a_severity_free_split(
+    populated: psycopg.Connection,
+) -> None:
+    # The rule reads fatal_count and failure_count directly, so it has to be
+    # scored on the full split. Asking for it without those columns must fail
+    # loudly rather than quietly scoring something else.
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    reduced = evaluation.reduced
+    with pytest.raises(ValueError):
+        severity_rule(reduced, reduced.x_test)
 
 
 def test_metrics_are_in_range_and_counts_cover_the_test_set(
@@ -74,9 +123,10 @@ def test_best_is_the_highest_f1(populated: psycopg.Connection) -> None:
 
 def test_report_names_the_split_and_every_detector(populated: psycopg.Connection) -> None:
     report = format_report(evaluate(populated, window_seconds=60, train_fraction=0.7))
-    for name in DETECTORS:
-        assert name in report
+    for label in DETECTOR_LABELS:
+        assert label in report
     assert "chronological" in report
+    assert "Dropped for the severity-free variant" in report
     assert "Window size      : 60s" in report
 
 
@@ -119,8 +169,8 @@ def test_cli_run_executes_the_whole_pipeline(
     assert "Schema applied." in output
     assert "rows inserted    : " in output
     assert "windows of 60s" in output
-    for name in DETECTORS:
-        assert name in output
+    for label in DETECTOR_LABELS:
+        assert label in output
 
 
 def test_cli_load_twice_reports_duplicates(

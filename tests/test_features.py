@@ -10,7 +10,12 @@ import psycopg
 import pytest
 
 from netlog_anomaly.etl import load_file, refresh_windows
-from netlog_anomaly.features import BASE_FEATURES, build_split
+from netlog_anomaly.features import (
+    BASE_FEATURES,
+    SEVERITY_FEATURES,
+    build_split,
+    drop_features,
+)
 
 BASE_EPOCH = 1117838520  # 2005-06-03 22:42:00 UTC, a 60 second boundary
 
@@ -170,3 +175,79 @@ def test_cutoff_is_an_actual_window_boundary(conn: psycopg.Connection, tmp_path:
     make_windows(conn, tmp_path, simple_lines(10))
     split = build_split(conn, window_seconds=60, train_fraction=0.7)
     assert split.cutoff == datetime.fromtimestamp(BASE_EPOCH + 7 * 60, tz=UTC)
+
+
+def test_drop_features_removes_exactly_the_named_columns(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    make_windows(conn, tmp_path, simple_lines(10))
+    split = build_split(conn, window_seconds=60, train_fraction=0.7, top_templates=2)
+    reduced = drop_features(split, ["event_count", "error_rate"])
+
+    assert "event_count" not in reduced.feature_names
+    assert "error_rate" not in reduced.feature_names
+    assert len(reduced.feature_names) == len(split.feature_names) - 2
+    assert reduced.x_train.shape == (split.n_train, len(reduced.feature_names))
+    assert reduced.x_test.shape == (split.n_test, len(reduced.feature_names))
+
+
+def test_drop_features_keeps_rows_labels_and_split_boundary(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    make_windows(conn, tmp_path, simple_lines(10))
+    split = build_split(conn, window_seconds=60, train_fraction=0.7, top_templates=2)
+    reduced = drop_features(split, SEVERITY_FEATURES)
+
+    assert reduced.y_train.tolist() == split.y_train.tolist()
+    assert reduced.y_test.tolist() == split.y_test.tolist()
+    assert reduced.train_starts == split.train_starts
+    assert reduced.test_starts == split.test_starts
+    assert reduced.cutoff == split.cutoff
+
+
+def test_drop_features_preserves_the_surviving_column_values(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    make_windows(conn, tmp_path, simple_lines(10))
+    split = build_split(conn, window_seconds=60, train_fraction=0.7, top_templates=2)
+    reduced = drop_features(split, SEVERITY_FEATURES)
+
+    for name in reduced.feature_names:
+        assert reduced.x_test[:, reduced.column(name)].tolist() == (
+            split.x_test[:, split.column(name)].tolist()
+        )
+
+
+def test_severity_free_variant_has_no_severity_column(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    make_windows(conn, tmp_path, simple_lines(10))
+    split = build_split(conn, window_seconds=60, train_fraction=0.7, top_templates=2)
+    reduced = drop_features(split, SEVERITY_FEATURES)
+
+    assert set(reduced.feature_names).isdisjoint(SEVERITY_FEATURES)
+    assert reduced.feature_names[:3] == ("event_count", "distinct_nodes", "distinct_templates")
+    # The template columns survive: they are derived from the message, not the
+    # severity column.
+    assert reduced.template_features == split.template_features
+
+
+def test_every_severity_feature_is_a_real_base_feature() -> None:
+    assert set(SEVERITY_FEATURES) < set(BASE_FEATURES)
+
+
+def test_dropping_an_unknown_feature_is_rejected(conn: psycopg.Connection, tmp_path: Path) -> None:
+    make_windows(conn, tmp_path, simple_lines(10))
+    split = build_split(conn, window_seconds=60, train_fraction=0.7)
+    with pytest.raises(ValueError, match="not features of this split: nonsense"):
+        drop_features(split, ["nonsense"])
+
+
+def test_dropping_nothing_leaves_the_split_unchanged(
+    conn: psycopg.Connection, tmp_path: Path
+) -> None:
+    make_windows(conn, tmp_path, simple_lines(10))
+    split = build_split(conn, window_seconds=60, train_fraction=0.7, top_templates=2)
+    reduced = drop_features(split, [])
+    assert reduced.feature_names == split.feature_names
+    assert reduced.x_train.tolist() == split.x_train.tolist()
