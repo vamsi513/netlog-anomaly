@@ -26,8 +26,16 @@ def database_url() -> str:
 
 
 def connect(url: str | None = None) -> psycopg.Connection:
-    """Open a connection. The caller owns the transaction."""
-    return psycopg.connect(url or database_url())
+    """Open a connection. The caller owns the transaction.
+
+    The session timezone is forced to UTC so reported window timestamps are
+    the same string on any machine, whatever the server is configured to use.
+    """
+    conn = psycopg.connect(url or database_url())
+    with conn.cursor() as cur:
+        cur.execute("SET TIME ZONE 'UTC'")
+    conn.commit()
+    return conn
 
 
 def read_sql(name: str) -> str:

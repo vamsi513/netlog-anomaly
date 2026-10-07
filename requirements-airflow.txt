@@ -1,0 +1,12 @@
+# Only needed for the optional Airflow DAG. Keep this out of the main
+# requirements: Airflow pins a large dependency set of its own, and the
+# pipeline and its tests do not need any of it.
+#
+# Install into a separate virtual environment, using Airflow's own constraints
+# so the pinned set is the one upstream tests:
+#
+#   python3 -m venv .venv-airflow
+#   .venv-airflow/bin/pip install -r requirements-airflow.txt \
+#     --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.13.txt
+#   .venv-airflow/bin/pip install -r requirements.txt
+apache-airflow==3.3.2

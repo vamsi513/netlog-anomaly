@@ -176,3 +176,15 @@ def test_refresh_windows_is_idempotent(conn: psycopg.Connection, sample_log: Pat
     second = refresh_windows(conn, window_seconds=60)
     assert first == second
     assert scalar(conn, "SELECT count(*) FROM window_features") == first[0]
+
+
+def test_connections_report_timestamps_in_utc(database_url: str) -> None:
+    # Window timestamps appear in the results table, so they must not depend on
+    # how the server happens to be configured.
+    from netlog_anomaly.db import connect
+
+    with connect(database_url) as conn, conn.cursor() as cur:
+        cur.execute("SHOW TIME ZONE")
+        row = cur.fetchone()
+    assert row is not None
+    assert row[0] == "UTC"
