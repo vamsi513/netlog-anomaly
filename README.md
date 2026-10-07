@@ -8,8 +8,10 @@ are measured against the dataset's own labels.
 The headline result is that **the simplest possible rule wins**. A rule that
 flags any window containing a `FATAL` or `FAILURE` line scores F1 0.759 on the
 held-out test period, against 0.392 for a tuned z-score baseline and 0.152 for
-an Isolation Forest. The numbers below are what the code produced, not what
-would make the project look better.
+an Isolation Forest. Strip the severity-derived features out and the z-score
+collapses to 0.013 while the forest does not move, which says the z-score was
+reading severity and the forest never was. The numbers below are what the code
+produced, not what would make the project look better.
 
 ## Dataset
 
@@ -114,8 +116,25 @@ template that floods the test period and must not become a feature.
 | Detector | What it does | What it sees when fitting |
 |---|---|---|
 | severity rule | Flags any window with a `FATAL` or `FAILURE` line | Nothing. No fitting. |
-| z-score baseline | Flags windows whose largest absolute z-score across all 30 features exceeds a threshold | Training feature means and standard deviations, plus **training labels** to pick the threshold that maximises training F1 |
+| z-score baseline | Flags windows whose largest absolute z-score across the feature set exceeds a threshold | Training feature means and standard deviations, plus **training labels** to pick the threshold that maximises training F1 |
 | isolation forest | scikit-learn `IsolationForest`, 200 trees, seed 42 | Training features, unlabelled, plus the training anomaly rate as the contamination parameter |
+
+Both learned detectors are run on two feature sets:
+
+- **all features** — all 30 columns, including the per-severity counts and the
+  error rate.
+- **severity-free** — the same split with all seven severity-derived columns
+  dropped (`info_count`, `warning_count`, `error_count`, `severe_count`,
+  `fatal_count`, `failure_count`, `error_rate`), leaving 23: event count,
+  distinct node and template counts, and the 20 template columns. `error_rate`
+  is dropped along with the raw counts because it is a ratio of them, and
+  keeping it would leave the severity signal in a variant that claims not to
+  use it.
+
+Both variants are built from the same split and scored on identical windows
+with identical labels, so the difference between them is the feature set and
+nothing else. The severity rule is unaffected — it reads the severity columns
+directly and is always scored on the full split.
 
 The severity rule is in the table as a floor, not as a contribution. Every one
 of the 348,460 alert-labelled lines in BGL carries `FATAL` or `FAILURE`
@@ -142,15 +161,21 @@ Dataset as loaded:
 | Train / test windows | 19,237 / 8,245 |
 | Split cutoff | 2005-11-01T20:27:00Z |
 | Anomalous windows | 1,434 train (7.45%), 404 test (4.90%) |
-| Features | 30 (10 base, 20 template columns chosen from train) |
+| Features | 30 all features; 23 severity-free (20 template columns chosen from train) |
 
 Scores on the **test period only**:
 
-| Detector | Precision | Recall | F1 | TP | FP | FN | TN |
-|---|---|---|---|---|---|---|---|
-| severity rule | 0.6112 | 1.0000 | **0.7587** | 404 | 257 | 0 | 7584 |
-| z-score baseline (max \|z\| ≥ 2.5065) | 0.2736 | 0.6881 | 0.3915 | 278 | 738 | 126 | 7103 |
-| isolation forest (200 trees, contamination 0.0745) | 0.1851 | 0.1287 | 0.1518 | 52 | 229 | 352 | 7612 |
+| Detector | Features | Precision | Recall | F1 | TP | FP | FN | TN |
+|---|---|---|---|---|---|---|---|---|
+| severity rule | — | 0.6112 | 1.0000 | **0.7587** | 404 | 257 | 0 | 7584 |
+| z-score baseline | all 30 | 0.2736 | 0.6881 | 0.3915 | 278 | 738 | 126 | 7103 |
+| isolation forest | all 30 | 0.1851 | 0.1287 | 0.1518 | 52 | 229 | 352 | 7612 |
+| z-score baseline | severity-free, 23 | 0.0140 | 0.0124 | 0.0131 | 5 | 353 | 399 | 7488 |
+| isolation forest | severity-free, 23 | 0.1889 | 0.1262 | 0.1513 | 51 | 219 | 353 | 7622 |
+
+Tuned thresholds: max \|z\| ≥ 2.5065 on all features, ≥ 6.2576 severity-free.
+Both forests ran at 200 trees with contamination 0.0745, the training anomaly
+rate.
 
 Timings on the same machine: 70.3s to parse and load 4.7M lines and 9.7s to
 build the windows, with under a second to fit and score all three detectors.
@@ -160,26 +185,57 @@ database is about 1.3 GB.
 
 ### Reading these numbers
 
-The **trivial rule beats both learned detectors by a wide margin**, and the
-Isolation Forest is the worst of the three. That is the honest result, and it is
-worth being specific about why rather than presenting it as a surprise:
+The **trivial rule beats every learned variant by a wide margin**, and all four
+learned variants are poor. That is the honest result, and it is worth being
+specific about why rather than presenting it as a surprise:
 
-- BGL's alert labels are not statistical outliers in window volume. Many
-  high-traffic windows are entirely normal and many alert windows are small, so
-  an unsupervised outlier detector keyed on feature magnitude is looking for the
-  wrong thing. The Isolation Forest finds 52 of 404 anomalous test windows.
 - The severity rule's recall of exactly 1.0000 is not a sign of a leak. It
   follows from the dataset: an alert line is always `FATAL` or `FAILURE`, so a
   window containing an alert always contains such a line. Its 257 false
   positives are the real information — `FATAL` windows that the BG/L
   administrators did not treat as alerts.
+- **The z-score baseline was reading severity and little else.** Removing the
+  severity columns takes it from F1 0.3915 to 0.0131 — from a mediocre detector
+  to one no better than guessing. Its 0.3915 was not evidence that window
+  statistics detect anomalies; it was a noisier route to the severity signal
+  the rule reads directly.
+- **The Isolation Forest was not using severity at all.** It scores 0.1518 with
+  those columns and 0.1513 without, a difference of five hundredths of a
+  percent. The severity features were available to it and it did not exploit
+  them; its weakness is not a missing feature.
+- BGL's alert labels are not statistical outliers in window volume. Many
+  high-traffic windows are entirely normal and many alert windows are small, so
+  an unsupervised detector keyed on feature magnitude is looking for the wrong
+  thing. That is the same conclusion from both directions: the forest finds 52
+  of 404 anomalous test windows with severity and 51 without.
 - The train and test anomaly rates differ (7.45% against 4.90%) because the
   split is chronological and the log is not stationary. A random split would
   have matched the rates and inflated every score, which is the reason not to
   use one.
-- No hyperparameter search was run for the Isolation Forest, and the z-score
-  threshold is the only tuned quantity. A tuned forest would likely do better
-  than 0.152; it is not reported here because it was not measured.
+- No hyperparameter search was run for either forest, and the z-score threshold
+  is the only tuned quantity. A tuned forest would likely beat 0.152; it is not
+  reported here because it was not measured.
+
+### What the severity-free variant does and does not show
+
+**It shows** that neither learned detector recovers the labels from window
+volume, node spread and template mix alone. The z-score drops to 0.0131 and the
+forest stays at 0.1513. On this dataset, with these features, removing the
+severity field removes essentially all of the usable signal the z-score had and
+none of the (little) signal the forest had.
+
+**It does not show** that the variant is free of every correlate of severity.
+The 20 template columns survive the cut, and some of those templates *are* the
+messages that carry `FATAL` severity — `data TLB error interrupt` is a template
+and a fatal condition at once. The variant removes the severity **column**, not
+every trace of the information in it. A genuinely severity-independent test
+would need features built only from volume and timing, which is not what is
+measured here.
+
+**It also does not show** that severity features are illegitimate. Severity is
+part of the log line and available at inference time, so using it is fair. The
+variant exists to make visible how much of each learned score depends on it,
+not to argue the full-feature numbers are invalid.
 
 ## Optional: Airflow DAG
 
@@ -234,24 +290,40 @@ reachable.
   `FATAL` or `FAILURE`, this dataset is a weak test of a learned detector. A
   dataset whose labels are not recoverable from a single field would be a more
   honest benchmark.
-- **Severity features are included.** `fatal_count` and `failure_count` are
-  among the 30 features, so the learned detectors can read the field that
-  nearly determines the label. This is not leakage — severity is part of the log
-  line, available at inference time — but it does mean the learned scores are
-  not independent of the severity signal. The severity rule is reported
-  alongside them so the overlap is visible rather than hidden.
+- **Severity features are included in the full variant,** so the learned
+  detectors can read the field that nearly determines the label. This is not
+  leakage — severity is part of the log line, available at inference time — but
+  it does mean those scores are not independent of the severity signal. The
+  severity-free variant and the severity rule are both reported so the overlap
+  is visible rather than hidden.
+- **The severity-free variant is not severity-independent.** Dropping the seven
+  severity columns leaves the 20 template columns, and some templates are
+  themselves fatal messages. It measures the cost of removing the severity
+  field, not of removing the information.
+- **Four of the five reported detector runs are poor.** The best learned F1 is
+  0.3915, and that one collapses to 0.0131 when severity is withheld. This is a
+  measurement of these detectors on this dataset with these features, not
+  evidence that log anomaly detection does not work.
 - **Hand-rolled templating.** Masking plus hashing is not a log parser. A
   learned parser such as Drain would produce a different, probably better,
   template set, and the template features would change with it.
 - **Window labels are coarse.** One alert line makes a whole 60-second window
   anomalous. A window with a single alert and one with two hundred are the same
   label.
-- **No hyperparameter search.** The Isolation Forest runs at defaults with a
-  contamination rate taken from the training split. The reported 0.152 is that
-  configuration's score, not the best achievable.
+- **No hyperparameter search.** Both forests run at defaults with a
+  contamination rate taken from the training split. The reported 0.152 and
+  0.151 are those configurations' scores, not the best achievable.
 - **Quarantine is not exhaustive.** Validation catches 320 malformed lines.
   Lines whose columns shifted in a way that still lands a valid severity token
   in the ninth position would pass; the severity allowlist is what makes this
   rare rather than impossible.
 - **Rejected lines are buffered in memory** during a load. That is fine when
   rejects are a small minority, which is the only case this is built for.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+The BGL dataset is **not** covered by this license. It is published on Zenodo
+under CC BY 4.0 and is not redistributed here; `scripts/download_data.sh`
+fetches it from the original source.
