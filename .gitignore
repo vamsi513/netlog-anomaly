@@ -1,17 +1,24 @@
 # Data (never committed; fetch with scripts/download_data.sh)
 data/
-*.log
 *.zip
 *.gz
+
+# Log files, except the small hand-written fixtures the tests need
+*.log
+!tests/fixtures/*.log
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
+.venv-airflow/
 venv/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# Airflow local state
+.airflow/
 
 # Local env / outputs
 .env
