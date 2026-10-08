@@ -1,3 +1,10 @@
 -r requirements.txt
+-r requirements-api.txt
 pytest==8.4.2
 ruff==0.14.0
+
+# API test client. Starlette's TestClient wants httpx2; the original httpx
+# raises a deprecation warning on import.
+httpx2==2.13.1
+httpcore2==2.13.1
+certifi==2026.7.22
