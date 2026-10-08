@@ -7,11 +7,16 @@ are measured against the dataset's own labels.
 
 The headline result is that **the simplest possible rule wins**. A rule that
 flags any window containing a `FATAL` or `FAILURE` line scores F1 0.759 on the
-held-out test period, against 0.392 for a tuned z-score baseline and 0.152 for
-an Isolation Forest. Strip the severity-derived features out and the z-score
-collapses to 0.013 while the forest does not move, which says the z-score was
-reading severity and the forest never was. The numbers below are what the code
+held-out test period. The best learned detector, gradient boosting on features
+with every severity column removed, reaches 0.553. Strip the severity features
+from the unsupervised detectors and the z-score collapses from 0.392 to 0.013
+while the Isolation Forest does not move, which says the z-score was reading
+severity and the forest never was. The numbers below are what the code
 produced, not what would make the project look better.
+
+There is also a small dashboard: a read-only FastAPI service over the results
+tables and a Next.js page that charts the window timeline, shows the detector
+comparison and drills into a single window's templates.
 
 ## Dataset
 
@@ -119,7 +124,22 @@ template that floods the test period and must not become a feature.
 | z-score baseline | Flags windows whose largest absolute z-score across the feature set exceeds a threshold | Training feature means and standard deviations, plus **training labels** to pick the threshold that maximises training F1 |
 | isolation forest | scikit-learn `IsolationForest`, 200 trees, seed 42 | Training features, unlabelled, plus the training anomaly rate as the contamination parameter |
 
-Both learned detectors are run on two feature sets:
+Two supervised detectors are also fitted, on the severity-free set only:
+
+| Detector | What it does | What it sees when fitting |
+|---|---|---|
+| logistic regression | `LogisticRegression` on standardised features, inside a pipeline so the scaler is fitted on the fit slice alone | The fit slice's features **and labels**, plus the validation slice to choose a probability threshold |
+| gradient boosting | `HistGradientBoostingClassifier`, seed 42, defaults | The same |
+
+These need a decision threshold, and where that threshold is chosen decides
+whether the result means anything. The training period is therefore split a
+second time, in time order: the model fits on the **earlier 80%** of training
+windows and the threshold that maximises F1 is chosen on the **later 20%**. The
+test period is touched by neither step. The model reported is the one fitted on
+the fit slice rather than a refit on all of training, because refitting shifts
+the score distribution and the tuned threshold stops meaning what it meant.
+
+The unsupervised detectors are run on two feature sets:
 
 - **all features** — all 30 columns, including the per-severity counts and the
   error rate.
@@ -165,17 +185,21 @@ Dataset as loaded:
 
 Scores on the **test period only**:
 
-| Detector | Features | Precision | Recall | F1 | TP | FP | FN | TN |
-|---|---|---|---|---|---|---|---|---|
-| severity rule | — | 0.6112 | 1.0000 | **0.7587** | 404 | 257 | 0 | 7584 |
-| z-score baseline | all 30 | 0.2736 | 0.6881 | 0.3915 | 278 | 738 | 126 | 7103 |
-| isolation forest | all 30 | 0.1851 | 0.1287 | 0.1518 | 52 | 229 | 352 | 7612 |
-| z-score baseline | severity-free, 23 | 0.0140 | 0.0124 | 0.0131 | 5 | 353 | 399 | 7488 |
-| isolation forest | severity-free, 23 | 0.1889 | 0.1262 | 0.1513 | 51 | 219 | 353 | 7622 |
+| Detector | Supervised | Features | Precision | Recall | F1 | TP | FP | FN | TN |
+|---|---|---|---|---|---|---|---|---|---|
+| severity rule | no | — | 0.6112 | 1.0000 | **0.7587** | 404 | 257 | 0 | 7584 |
+| gradient boosting | yes | severity-free, 23 | 0.5662 | 0.5396 | 0.5526 | 218 | 167 | 186 | 7674 |
+| logistic regression | yes | severity-free, 23 | 0.4424 | 0.3614 | 0.3978 | 146 | 184 | 258 | 7657 |
+| z-score baseline | no | all 30 | 0.2736 | 0.6881 | 0.3915 | 278 | 738 | 126 | 7103 |
+| isolation forest | no | all 30 | 0.1851 | 0.1287 | 0.1518 | 52 | 229 | 352 | 7612 |
+| isolation forest | no | severity-free, 23 | 0.1889 | 0.1262 | 0.1513 | 51 | 219 | 353 | 7622 |
+| z-score baseline | no | severity-free, 23 | 0.0140 | 0.0124 | 0.0131 | 5 | 353 | 399 | 7488 |
 
-Tuned thresholds: max \|z\| ≥ 2.5065 on all features, ≥ 6.2576 severity-free.
-Both forests ran at 200 trees with contamination 0.0745, the training anomaly
-rate.
+Tuned thresholds: max \|z\| ≥ 2.5065 on all features and ≥ 6.2576
+severity-free; probability ≥ 0.6647 for gradient boosting and ≥ 0.0678 for
+logistic regression, both chosen on a 3,848 window validation slice after
+fitting on 15,389. Both forests ran at 200 trees with contamination 0.0745, the
+training anomaly rate.
 
 Timings on the same machine: 70.3s to parse and load 4.7M lines and 9.7s to
 build the windows, with under a second to fit and score all three detectors.
@@ -186,9 +210,10 @@ database is about 1.3 GB.
 
 ### Reading these numbers
 
-The **trivial rule beats every learned variant by a wide margin**, and all four
-learned variants are poor. That is the honest result, and it is worth being
-specific about why rather than presenting it as a surprise:
+The **trivial rule still beats every learned detector**, including both
+supervised ones, and it does so without being fitted to anything. That is the
+honest result, and it is worth being specific about why rather than presenting
+it as a surprise:
 
 - The severity rule's recall of exactly 1.0000 is not a sign of a leak. It
   follows from the dataset: an alert line is always `FATAL` or `FAILURE`, so a
@@ -204,6 +229,17 @@ specific about why rather than presenting it as a surprise:
   those columns and 0.1513 without, a difference of five hundredths of a
   percent. The severity features were available to it and it did not exploit
   them; its weakness is not a missing feature.
+- **Supervision is worth a lot, and still not enough.** Gradient boosting on
+  the severity-free features reaches 0.5526 against 0.1513 for the best
+  unsupervised detector on the same 23 columns. Labels during training are what
+  closes most of that gap. It is still 0.21 short of a rule that reads one
+  field and is fitted to nothing.
+- **Both supervised models generalise worse than their validation suggested.**
+  Gradient boosting scored F1 0.7423 on the validation slice and 0.5526 on the
+  test period; logistic regression scored 0.5517 and 0.3978. The validation
+  slice is adjacent in time to the fit slice while the test period is months
+  later, so the drop is the log changing, not a tuning mistake. Quoting the
+  validation figure as the result would overstate both models by roughly 0.16.
 - BGL's alert labels are not statistical outliers in window volume. Many
   high-traffic windows are entirely normal and many alert windows are small, so
   an unsupervised detector keyed on feature magnitude is looking for the wrong
@@ -219,24 +255,66 @@ specific about why rather than presenting it as a surprise:
 
 ### What the severity-free variant does and does not show
 
-**It shows** that neither learned detector recovers the labels from window
-volume, node spread and template mix alone. The z-score drops to 0.0131 and the
-forest stays at 0.1513. On this dataset, with these features, removing the
-severity field removes essentially all of the usable signal the z-score had and
-none of the (little) signal the forest had.
+**It shows** that the unsupervised detectors do not recover the labels from
+window volume, node spread and template mix alone: the z-score drops to 0.0131
+and the forest stays at 0.1513. It also shows that a supervised model on those
+same 23 columns does find real signal in them — gradient boosting reaches
+0.5526 — so the features are not empty; the unsupervised methods were simply
+asking the wrong question of them.
 
 **It does not show** that the variant is free of every correlate of severity.
 The 20 template columns survive the cut, and some of those templates *are* the
 messages that carry `FATAL` severity — `data TLB error interrupt` is a template
 and a fatal condition at once. The variant removes the severity **column**, not
-every trace of the information in it. A genuinely severity-independent test
-would need features built only from volume and timing, which is not what is
-measured here.
+every trace of the information in it. This matters most for the supervised
+models: gradient boosting's 0.5526 is partly it learning which templates are
+fatal ones, which is a different achievement from detecting anomalies without
+severity information. A genuinely severity-independent test would need features
+built only from volume and timing, which is not what is measured here.
 
 **It also does not show** that severity features are illegitimate. Severity is
 part of the log line and available at inference time, so using it is fair. The
 variant exists to make visible how much of each learned score depends on it,
 not to argue the full-feature numbers are invalid.
+
+## Dashboard
+
+A read-only API and a single page over the results the pipeline stored. Run the
+pipeline first; the dashboard displays what is in Postgres and nothing else.
+
+```bash
+# API, from the project virtual environment
+pip install -r requirements-api.txt
+export NETLOG_DATABASE_URL=postgresql://localhost:5432/netlog
+uvicorn netlog_anomaly.api:app --port 8000
+
+# Page, in another shell
+cd frontend
+npm ci
+npm run dev           # http://localhost:3000
+```
+
+If the page is served from anywhere other than port 3000, set
+`NETLOG_CORS_ORIGINS` for the API to that origin, and
+`NEXT_PUBLIC_API_BASE_URL` for the page to the API's.
+
+| Route | Returns |
+|---|---|
+| `GET /api/health` | Liveness plus row counts |
+| `GET /api/summary` | Window counts, anomaly rate and the span covered |
+| `GET /api/detectors` | The comparison table, best F1 first |
+| `GET /api/windows` | Windows in time order with labels and per-detector flags |
+| `GET /api/windows/{window_start}/templates` | One window's stats and top templates |
+
+Every route is a GET, every statement is a SELECT, and the connection is opened
+read-only, so the dashboard cannot change what was measured. Detector flags
+exist only for the scored test period; elsewhere the flag map is empty rather
+than all-negative, which would read as every detector agreeing when in fact
+none of them ran there.
+
+The page shows the timeline on a **log scale**: event counts per window run
+from 1 to over 16,000 and most windows hold a single event, so a linear axis
+renders nearly everything as a flat line.
 
 ## Optional: Airflow DAG
 
@@ -271,13 +349,17 @@ above.
 
 ## CI
 
-`.github/workflows/ci.yml` runs ruff, the full pytest suite of 114 tests
-against a real Postgres service container, and a CLI smoke test over the
-committed fixtures that loads the same file twice to prove the load is
-idempotent. Versions are pinned rather than floating: Python 3.13.15,
-`postgres:17.11`, ruff 0.14.0, `ubuntu-24.04`, and actions pinned to commit
-SHAs. CI does not download the dataset; it checks that the download script
-parses and that the Zenodo URL is reachable.
+`.github/workflows/ci.yml` has two jobs. The first runs ruff, the full pytest
+suite of 165 tests against a real Postgres service container, and a CLI smoke
+test over the committed fixtures that loads the same file twice to prove the
+load is idempotent. The second installs the frontend with `npm ci`, which
+installs exactly the lockfile and fails if it disagrees with `package.json`,
+then lints, typechecks and builds it.
+
+Versions are pinned rather than floating: Python 3.13.15, `postgres:17.11`,
+ruff 0.14.0, Node 24.14.1, Next 16.4.0, TypeScript 5.9.3, `ubuntu-24.04`, and
+actions pinned to commit SHAs. CI does not download the dataset; it checks that
+the download script parses and that the Zenodo URL is reachable.
 
 ## Limitations
 
@@ -301,10 +383,19 @@ parses and that the Zenodo URL is reachable.
   severity columns leaves the 20 template columns, and some templates are
   themselves fatal messages. It measures the cost of removing the severity
   field, not of removing the information.
-- **Four of the five reported detector runs are poor.** The best learned F1 is
-  0.3915, and that one collapses to 0.0131 when severity is withheld. This is a
-  measurement of these detectors on this dataset with these features, not
-  evidence that log anomaly detection does not work.
+- **Five of the seven reported detector runs are poor.** The best learned F1 is
+  0.5526 and the next is 0.3978; the remaining four sit between 0.15 and 0.01.
+  This is a measurement of these detectors on this dataset with these features,
+  not evidence that log anomaly detection does not work.
+- **The supervised results are single configurations, not tuned ceilings.**
+  Both models run at scikit-learn defaults with only the decision threshold
+  chosen. No search over depth, regularisation, learning rate or class weights
+  was run, and no cross-validation: there is one fit slice and one validation
+  slice. A tuned model would likely score higher.
+- **Validation and test scores differ substantially** for both supervised
+  models, by roughly 0.16 F1. Only the test numbers are reported as results.
+  Anyone reusing this split should expect the same gap rather than treating the
+  validation figure as the achievable score.
 - **Hand-rolled templating.** Masking plus hashing is not a log parser. A
   learned parser such as Drain would produce a different, probably better,
   template set, and the template features would change with it.
@@ -320,6 +411,12 @@ parses and that the Zenodo URL is reachable.
   rare rather than impossible.
 - **Rejected lines are buffered in memory** during a load. That is fine when
   rejects are a small minority, which is the only case this is built for.
+- **The dashboard shows stored results, not live scoring.** Detector flags come
+  from the predictions the last `evaluate` run wrote. Nothing is scored on
+  demand, and a window outside the test period has no flags at all.
+- **The dashboard has no authentication.** It is read-only and intended for
+  localhost. Exposing it would publish the contents of the results tables to
+  anyone who can reach it.
 
 ## License
 
