@@ -10,8 +10,9 @@ import pytest
 
 from netlog_anomaly.detect import severity_rule
 from netlog_anomaly.etl import load_file, refresh_windows
-from netlog_anomaly.evaluate import evaluate, format_report
+from netlog_anomaly.evaluate import evaluate, format_report, store_evaluation
 from netlog_anomaly.features import SEVERITY_FEATURES
+from netlog_anomaly.metrics import score
 from netlog_anomaly.pipeline import main
 from tests.conftest import TEST_SCHEMA
 from tests.test_features import BASE_EPOCH, write_log
@@ -22,6 +23,8 @@ DETECTOR_LABELS = (
     "isolation forest (all features)",
     "z-score baseline (severity-free)",
     "isolation forest (severity-free)",
+    "logistic regression (severity-free)",
+    "gradient boosting (severity-free)",
 )
 
 
@@ -189,3 +192,111 @@ def test_cli_load_twice_reports_duplicates(
     output = capsys.readouterr().out
     assert "rows inserted    : 0" in output
     assert "duplicates skipped: 40" in output
+
+
+SUPERVISED = ("logistic regression", "gradient boosting")
+
+
+def test_supervised_detectors_are_scored(populated: psycopg.Connection) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    names = {r.name for r in evaluation.results}
+    assert set(SUPERVISED) <= names
+
+
+def test_supervised_detectors_only_ever_see_severity_free_features(
+    populated: psycopg.Connection,
+) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    for result in evaluation.results:
+        if result.name in SUPERVISED:
+            assert result.variant == "severity-free"
+    assert set(evaluation.reduced.feature_names).isdisjoint(SEVERITY_FEATURES)
+
+
+def test_every_result_predicts_once_per_test_window(populated: psycopg.Connection) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    for result in evaluation.results:
+        assert len(result.predictions) == evaluation.split.n_test
+
+
+def test_predictions_agree_with_the_reported_confusion_counts(
+    populated: psycopg.Connection,
+) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    labels = evaluation.split.y_test.tolist()
+    for result in evaluation.results:
+        recomputed = score(labels, list(result.predictions))
+        assert recomputed == result.scores
+
+
+def test_store_evaluation_writes_scores_and_predictions(
+    populated: psycopg.Connection,
+) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    scores_written, predictions_written = store_evaluation(populated, evaluation)
+
+    assert scores_written == len(evaluation.results)
+    assert predictions_written == len(evaluation.results) * evaluation.split.n_test
+
+    with populated.cursor() as cur:
+        cur.execute("SELECT count(*) FROM detector_scores WHERE window_seconds = 60")
+        assert cur.fetchone()[0] == len(evaluation.results)
+        cur.execute("SELECT count(*) FROM window_predictions WHERE window_seconds = 60")
+        assert cur.fetchone()[0] == predictions_written
+
+
+def test_stored_scores_match_the_evaluation(populated: psycopg.Connection) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    store_evaluation(populated, evaluation)
+
+    with populated.cursor() as cur:
+        cur.execute(
+            """
+            SELECT detector, variant, precision, recall, f1,
+                   true_positives, false_positives, false_negatives, true_negatives
+              FROM detector_scores WHERE window_seconds = 60
+            """
+        )
+        stored = {(row[0], row[1]): row[2:] for row in cur.fetchall()}
+
+    for result in evaluation.results:
+        s = result.scores
+        assert stored[(result.name, result.variant)] == (
+            s.precision,
+            s.recall,
+            s.f1,
+            s.true_positives,
+            s.false_positives,
+            s.false_negatives,
+            s.true_negatives,
+        )
+
+
+def test_store_evaluation_replaces_rather_than_accumulates(
+    populated: psycopg.Connection,
+) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    first = store_evaluation(populated, evaluation)
+    for _ in range(2):
+        again = store_evaluation(populated, evaluation)
+        assert again == first
+
+    with populated.cursor() as cur:
+        cur.execute("SELECT count(*) FROM detector_scores WHERE window_seconds = 60")
+        assert cur.fetchone()[0] == len(evaluation.results)
+
+
+def test_stored_predictions_cover_exactly_the_test_windows(
+    populated: psycopg.Connection,
+) -> None:
+    evaluation = evaluate(populated, window_seconds=60, train_fraction=0.7, top_templates=5)
+    store_evaluation(populated, evaluation)
+
+    with populated.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT window_start FROM window_predictions WHERE window_seconds = 60"
+        )
+        stored = {row[0] for row in cur.fetchall()}
+    assert stored == set(evaluation.split.test_starts)
+    # No training window may appear.
+    assert stored.isdisjoint(evaluation.split.train_starts)
