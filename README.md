@@ -271,13 +271,13 @@ above.
 
 ## CI
 
-`.github/workflows/ci.yml` runs ruff, the full pytest suite against a real
-Postgres service container, and a CLI smoke test over the committed fixtures
-that loads the same file twice to prove the load is idempotent. Versions are
-pinned rather than floating: Python 3.13.15, `postgres:17.11`, ruff 0.14.0,
-`ubuntu-24.04`, and actions pinned to commit SHAs. CI does not download the
-dataset; it checks that the download script parses and that the Zenodo URL is
-reachable.
+`.github/workflows/ci.yml` runs ruff, the full pytest suite of 114 tests
+against a real Postgres service container, and a CLI smoke test over the
+committed fixtures that loads the same file twice to prove the load is
+idempotent. Versions are pinned rather than floating: Python 3.13.15,
+`postgres:17.11`, ruff 0.14.0, `ubuntu-24.04`, and actions pinned to commit
+SHAs. CI does not download the dataset; it checks that the download script
+parses and that the Zenodo URL is reachable.
 
 ## Limitations
 
