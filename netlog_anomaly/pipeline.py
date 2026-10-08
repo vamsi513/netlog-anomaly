@@ -18,7 +18,7 @@ import psycopg
 
 from netlog_anomaly import db
 from netlog_anomaly.etl import load_file, refresh_windows
-from netlog_anomaly.evaluate import evaluate, format_report
+from netlog_anomaly.evaluate import evaluate, format_report, store_evaluation
 
 
 def _init_db(conn: psycopg.Connection, reset: bool) -> None:
@@ -61,6 +61,9 @@ def _evaluate(
         top_templates=top_templates,
     )
     print(format_report(evaluation))
+    scores, predictions = store_evaluation(conn, evaluation)
+    print()
+    print(f"Stored {scores} detector scores and {predictions} window predictions.")
 
 
 def build_parser() -> argparse.ArgumentParser:

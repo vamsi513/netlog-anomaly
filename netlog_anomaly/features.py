@@ -69,6 +69,57 @@ class Split:
         return self.feature_names.index(name)
 
 
+@dataclass(frozen=True, slots=True)
+class FitValidation:
+    """A second chronological split, inside the training period only.
+
+    Supervised detectors need somewhere to fix a decision threshold. Doing that
+    on the test period would be leakage and doing it on the same rows the model
+    fitted on would overstate it, so the training period is split again in time
+    order: the model fits on the earlier part and the threshold is chosen on the
+    later part. The test period is not touched by either step.
+    """
+
+    x_fit: np.ndarray
+    y_fit: np.ndarray
+    x_validation: np.ndarray
+    y_validation: np.ndarray
+    fit_starts: tuple[datetime, ...]
+    validation_starts: tuple[datetime, ...]
+    cutoff: datetime
+
+    @property
+    def n_fit(self) -> int:
+        return int(self.x_fit.shape[0])
+
+    @property
+    def n_validation(self) -> int:
+        return int(self.x_validation.shape[0])
+
+
+def fit_validation_split(split: Split, fit_fraction: float = 0.8) -> FitValidation:
+    """Divide the training windows into a fit slice and a validation slice."""
+    if not 0.0 < fit_fraction < 1.0:
+        raise ValueError(f"fit_fraction must be between 0 and 1, got {fit_fraction}")
+
+    n_fit = int(split.n_train * fit_fraction)
+    if n_fit == 0 or n_fit == split.n_train:
+        raise ValueError(
+            f"fit_fraction={fit_fraction} leaves one side of the validation split empty "
+            f"for {split.n_train} training windows"
+        )
+
+    return FitValidation(
+        x_fit=split.x_train[:n_fit],
+        y_fit=split.y_train[:n_fit],
+        x_validation=split.x_train[n_fit:],
+        y_validation=split.y_train[n_fit:],
+        fit_starts=split.train_starts[:n_fit],
+        validation_starts=split.train_starts[n_fit:],
+        cutoff=split.train_starts[n_fit],
+    )
+
+
 def drop_features(split: Split, names: Iterable[str]) -> Split:
     """The same split with the named feature columns removed.
 

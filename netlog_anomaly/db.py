@@ -54,8 +54,9 @@ def reset_schema(conn: psycopg.Connection) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            DROP TABLE IF EXISTS window_template_counts, window_features,
-                quarantined_lines, log_events, event_templates, ingest_runs CASCADE
+            DROP TABLE IF EXISTS window_predictions, detector_scores,
+                window_template_counts, window_features, quarantined_lines,
+                log_events, event_templates, ingest_runs CASCADE
             """
         )
     apply_schema(conn)

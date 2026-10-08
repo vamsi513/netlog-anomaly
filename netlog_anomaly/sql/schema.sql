@@ -84,3 +84,36 @@ CREATE TABLE IF NOT EXISTS window_template_counts (
     event_count    INTEGER     NOT NULL,
     PRIMARY KEY (window_seconds, window_start, template_id)
 );
+
+-- Evaluation output. The detectors used to exist only in memory, so nothing
+-- could read their predictions back; the dashboard and the stored comparison
+-- table both need them persisted.
+CREATE TABLE IF NOT EXISTS detector_scores (
+    window_seconds  INTEGER          NOT NULL,
+    detector        TEXT             NOT NULL,
+    variant         TEXT             NOT NULL,
+    note            TEXT             NOT NULL,
+    precision       DOUBLE PRECISION NOT NULL,
+    recall          DOUBLE PRECISION NOT NULL,
+    f1              DOUBLE PRECISION NOT NULL,
+    true_positives  INTEGER          NOT NULL,
+    false_positives INTEGER          NOT NULL,
+    false_negatives INTEGER          NOT NULL,
+    true_negatives  INTEGER          NOT NULL,
+    evaluated_at    TIMESTAMPTZ      NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (window_seconds, detector, variant)
+);
+
+-- One row per test-period window per detector. Only the test period: that is
+-- the only span every detector is scored on.
+CREATE TABLE IF NOT EXISTS window_predictions (
+    window_seconds INTEGER     NOT NULL,
+    window_start   TIMESTAMPTZ NOT NULL,
+    detector       TEXT        NOT NULL,
+    variant        TEXT        NOT NULL,
+    predicted      BOOLEAN     NOT NULL,
+    PRIMARY KEY (window_seconds, window_start, detector, variant)
+);
+
+CREATE INDEX IF NOT EXISTS window_predictions_window_idx
+    ON window_predictions (window_seconds, window_start);
