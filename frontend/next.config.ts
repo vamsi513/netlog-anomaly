@@ -2,8 +2,8 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  // Next writes an AGENTS.md into the project on dev startup unless this is
-  // off. Nothing here needs it and it is not part of the project's docs.
+  // Next writes a generated AGENTS.md into the project root on dev startup
+  // unless this is disabled. It is not part of this project's documentation.
   agentRules: false,
 };
 
