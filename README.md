@@ -282,6 +282,13 @@ not to argue the full-feature numbers are invalid.
 A read-only API and a single page over the results the pipeline stored. Run the
 pipeline first; the dashboard displays what is in Postgres and nothing else.
 
+![The dashboard with an anomalous window selected](docs/dashboard.jpg)
+
+That screenshot is an unedited capture of the production build against the full
+BGL dataset. The selected window holds 183 events across 176 nodes at a 0.9672
+error rate; the severity rule and both z-score variants flagged it, and all
+four of the other detectors missed it.
+
 ```bash
 # API, from the project virtual environment
 pip install -r requirements-api.txt
