@@ -357,11 +357,11 @@ above.
 ## CI
 
 `.github/workflows/ci.yml` has two jobs. The first runs ruff, the full pytest
-suite of 165 tests against a real Postgres service container, and a CLI smoke
+suite of 169 tests against a real Postgres service container, and a CLI smoke
 test over the committed fixtures that loads the same file twice to prove the
 load is idempotent. The second installs the frontend with `npm ci`, which
 installs exactly the lockfile and fails if it disagrees with `package.json`,
-then lints, typechecks and builds it.
+then lints, typechecks, runs its 10 tests and builds it.
 
 Versions are pinned rather than floating: Python 3.13.15, `postgres:17.11`,
 ruff 0.14.0, Node 24.14.1, Next 16.4.0, TypeScript 5.9.3, `ubuntu-24.04`, and
