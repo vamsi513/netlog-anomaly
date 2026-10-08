@@ -10,6 +10,7 @@ Run it with:
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -25,17 +26,29 @@ from netlog_anomaly import db
 DEFAULT_WINDOW_SECONDS = 60
 MAX_LIMIT = 5000
 
+# The dashboard runs on its own origin, so the browser needs it allowed here.
+# Configurable because the dev server does not always get port 3000.
+CORS_ENV_VAR = "NETLOG_CORS_ORIGINS"
+DEFAULT_CORS_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+
+
+def allowed_origins() -> list[str]:
+    """Origins the browser may call this API from, comma separated in the env."""
+    configured = os.environ.get(CORS_ENV_VAR, "")
+    origins = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    return origins or list(DEFAULT_CORS_ORIGINS)
+
+
 app = FastAPI(
     title="netlog-anomaly",
     description="Read-only view of the window features and detector results.",
     version="0.1.0",
 )
 
-# The Next.js dev server runs on a different port, so the browser needs these
-# origins allowed. Only GET is permitted, matching the API itself.
+# Only GET is permitted, matching the API itself.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=allowed_origins(),
     allow_methods=["GET"],
     allow_headers=["*"],
 )
