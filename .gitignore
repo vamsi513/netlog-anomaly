@@ -23,3 +23,18 @@ venv/
 # Local env / outputs
 .env
 out/
+
+# Assistant and editor tool configuration. These are personal to whoever is
+# working on the checkout and are not part of the project. Next regenerates
+# AGENTS.md on dev startup unless agentRules is off in next.config.ts, which it
+# is; this rule is here so an accidental one cannot be committed either.
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.windsurf/
+.continue/
+.github/copilot-instructions.md
