@@ -10,6 +10,7 @@ on:
 # in a trailing comment for readability.
 env:
   PYTHON_VERSION: "3.13.15"
+  NODE_VERSION: "24.14.1"
   NETLOG_DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/netlog_ci"
 
 jobs:
@@ -41,6 +42,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
+        # requirements-dev.txt pulls in the pipeline and the API requirements.
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
@@ -78,3 +80,43 @@ jobs:
           bash -n scripts/download_data.sh
           curl --fail --silent --head --location \
             "https://zenodo.org/records/8196385/files/BGL.zip?download=1" > /dev/null
+
+  frontend:
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        # ci rather than install: it installs exactly the lockfile and fails if
+        # package.json and the lockfile disagree.
+        run: npm ci
+
+      - name: Report versions
+        run: |
+          node --version
+          npm --version
+          npx --no-install next --version
+          npx --no-install tsc --version
+          npx --no-install eslint --version
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
