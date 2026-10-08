@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import DetectorTable from "@/components/DetectorTable";
 import WindowDetailPanel from "@/components/WindowDetailPanel";
 import WindowTimeline from "@/components/WindowTimeline";
@@ -10,6 +10,7 @@ import {
   fetchWindowDetail,
   fetchWindows,
   formatNumber,
+  pageOffsetFor,
   formatTimestamp,
   type DetectorScore,
   type Summary,
@@ -25,7 +26,11 @@ export default function Page() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [detectors, setDetectors] = useState<DetectorScore[]>([]);
   const [windows, setWindows] = useState<WindowRow[]>([]);
-  const [offset, setOffset] = useState(0);
+  // Null until the summary says where to open. Windows are not fetched before
+  // then, so the first page the user sees is the right one rather than page
+  // one replaced a moment later.
+  const [offset, setOffset] = useState<number | null>(null);
+  const openedAt = useRef(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<WindowDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -41,6 +46,15 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
+    if (!summary || openedAt.current) return;
+    openedAt.current = true;
+    setOffset(
+      pageOffsetFor(summary.first_anomalous_index, PAGE_SIZE, summary.scored_windows),
+    );
+  }, [summary]);
+
+  useEffect(() => {
+    if (offset === null) return;
     fetchWindows(PAGE_SIZE, offset)
       .then(setWindows)
       .catch((cause: Error) => setError(cause.message));
@@ -73,8 +87,9 @@ export default function Page() {
   }
 
   const scoredTotal = summary?.scored_windows ?? 0;
-  const shownFrom = windows.length === 0 ? 0 : offset + 1;
-  const shownTo = offset + windows.length;
+  const currentOffset = offset ?? 0;
+  const shownFrom = windows.length === 0 ? 0 : currentOffset + 1;
+  const shownTo = currentOffset + windows.length;
 
   return (
     <main>
@@ -115,13 +130,13 @@ export default function Page() {
         <button
           // Functional updates: two clicks before a re-render would otherwise
           // both read the same stale offset and only move one page.
-          onClick={() => setOffset((current) => Math.max(0, current - PAGE_SIZE))}
-          disabled={offset === 0}
+          onClick={() => setOffset((current) => Math.max(0, (current ?? 0) - PAGE_SIZE))}
+          disabled={currentOffset === 0}
         >
           ← Earlier
         </button>
         <button
-          onClick={() => setOffset((current) => current + PAGE_SIZE)}
+          onClick={() => setOffset((current) => (current ?? 0) + PAGE_SIZE)}
           disabled={shownTo >= scoredTotal}
         >
           Later →

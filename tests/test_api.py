@@ -199,3 +199,49 @@ def test_a_write_through_the_api_connection_is_refused(client: TestClient) -> No
         conn.read_only = True
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction), conn.cursor() as cur:
             cur.execute("DELETE FROM detector_scores")
+
+
+def test_summary_reports_the_first_anomalous_scored_window(client: TestClient) -> None:
+    body = client.get("/api/summary").json()
+    index = body["first_anomalous_index"]
+    assert isinstance(index, int)
+    assert 0 <= index < body["scored_windows"]
+
+
+def test_first_anomalous_index_matches_the_scored_window_list(
+    client: TestClient,
+) -> None:
+    # The index is a position within the scored windows in time order, which is
+    # exactly what /api/windows?scored_only=true returns.
+    body = client.get("/api/summary").json()
+    rows = client.get("/api/windows", params={"scored_only": True, "limit": 5000}).json()
+
+    index = body["first_anomalous_index"]
+    assert rows[index]["is_anomalous"] is True
+    assert all(not row["is_anomalous"] for row in rows[:index])
+
+
+def test_first_anomalous_index_counts_scored_windows_only(client: TestClient) -> None:
+    # Training windows precede the scored ones and include anomalous windows,
+    # so an index counted over every window would point at the wrong row.
+    body = client.get("/api/summary").json()
+    all_rows = client.get("/api/windows", params={"limit": 5000}).json()
+    scored = client.get("/api/windows", params={"scored_only": True, "limit": 5000}).json()
+
+    assert len(all_rows) > len(scored)
+    assert any(row["is_anomalous"] for row in all_rows[: len(all_rows) - len(scored)])
+    assert body["first_anomalous_index"] < len(scored)
+
+
+def test_first_anomalous_index_is_null_without_predictions(
+    conn: psycopg.Connection, client: TestClient
+) -> None:
+    # With nothing scored there is no scored list to index into, so the field
+    # must be null rather than zero, which would point at a real window.
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM window_predictions")
+    conn.commit()
+
+    body = client.get("/api/summary").json()
+    assert body["scored_windows"] == 0
+    assert body["first_anomalous_index"] is None

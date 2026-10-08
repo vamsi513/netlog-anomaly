@@ -144,7 +144,30 @@ def summary(
         """,
         (window_seconds,),
     )[0]
-    return {"window_seconds": window_seconds, **rows[0], **scored}
+    # Position of the first anomalous window within the scored list, so the
+    # dashboard can open on a stretch that actually contains anomalies instead
+    # of on a quiet run of windows at the start of the test period. Null when
+    # nothing has been scored or no scored window is anomalous.
+    first_anomalous = _rows(
+        conn,
+        """
+        SELECT min(position) AS first_anomalous_index
+          FROM (
+                SELECT f.is_anomalous,
+                       row_number() OVER (ORDER BY f.window_start) - 1 AS position
+                  FROM window_features f
+                 WHERE f.window_seconds = %(window_seconds)s
+                   AND EXISTS (
+                        SELECT 1 FROM window_predictions p
+                         WHERE p.window_seconds = f.window_seconds
+                           AND p.window_start = f.window_start
+                       )
+               ) ranked
+         WHERE is_anomalous
+        """,
+        {"window_seconds": window_seconds},
+    )[0]
+    return {"window_seconds": window_seconds, **rows[0], **scored, **first_anomalous}
 
 
 @app.get("/api/windows")

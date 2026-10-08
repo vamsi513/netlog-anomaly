@@ -15,6 +15,7 @@ export interface Summary {
   first_scored: string | null;
   last_scored: string | null;
   scored_windows: number;
+  first_anomalous_index: number | null;
 }
 
 export interface DetectorScore {
@@ -93,6 +94,23 @@ export function fetchWindowDetail(
   return getJson<WindowDetail>(
     `/api/windows/${encodeURIComponent(windowStart)}/templates?${query}`,
   );
+}
+
+/**
+ * Page offset that brings `index` into view, given a page size.
+ *
+ * The dashboard opens on the first anomalous scored window rather than at the
+ * start of the test period, which on this dataset is a long quiet stretch. A
+ * null or out-of-range index falls back to the first page.
+ */
+export function pageOffsetFor(
+  index: number | null,
+  pageSize: number,
+  total: number,
+): number {
+  if (index === null || !Number.isFinite(index) || index < 0) return 0;
+  if (total > 0 && index >= total) return 0;
+  return Math.floor(index / pageSize) * pageSize;
 }
 
 // Formatting helpers shared by the components.
