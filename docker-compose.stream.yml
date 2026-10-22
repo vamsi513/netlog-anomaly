@@ -1,0 +1,147 @@
+# Local stack for streaming mode: a three broker Kafka cluster in KRaft mode
+# and a single OpenSearch node.
+#
+# Three brokers rather than one so that replication factor 3 with
+# min.insync.replicas 2 is a real setting and not a lie the topic config
+# cannot honour. With one broker, acks=all would mean one copy on one disk,
+# and the failure test below would prove nothing about replication.
+#
+# KRaft combined mode puts the controller and the broker in the same process
+# on each node. A production cluster separates them; three combined nodes is
+# what fits on one laptop, and docs/STREAMING.md says so.
+#
+# Every listener is PLAINTEXT and OpenSearch runs with its security plugin
+# off. That is a local development stack, not a deployable one.
+
+name: netlog-stream
+
+x-kafka-common: &kafka-common
+  image: apache/kafka:4.1.0
+  # A fixed cluster id, so a restart rejoins the same cluster instead of
+  # refusing to start against formatted storage from a different one.
+  environment: &kafka-env
+    CLUSTER_ID: netlog-stream-cluster
+    KAFKA_PROCESS_ROLES: broker,controller
+    KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+    KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+    KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+    KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+    # Durability defaults for every topic created without an explicit setting,
+    # including the internal consumer offsets topic. The offsets topic matters
+    # here: the failure test kills a consumer, and the group can only resume
+    # from committed offsets if those offsets survived the loss of a broker.
+    KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+    KAFKA_MIN_INSYNC_REPLICAS: 2
+    KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+    KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+    KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+    # Without this, a consumer joining an empty group waits three seconds
+    # before the first assignment, which the tests would spend idle.
+    KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+  healthcheck:
+    test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+    interval: 10s
+    timeout: 10s
+    retries: 20
+    start_period: 20s
+
+services:
+  kafka1:
+    <<: *kafka-common
+    container_name: netlog-kafka1
+    ports:
+      - "19092:19092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+      # Clients inside the compose network reach the broker by service name;
+      # clients on the host reach it on the mapped port. A broker can only
+      # advertise one address per listener, hence two listeners.
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka1:9092,EXTERNAL://localhost:19092
+    volumes:
+      - kafka1-data:/var/lib/kafka/data
+
+  kafka2:
+    <<: *kafka-common
+    container_name: netlog-kafka2
+    ports:
+      - "19093:19093"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka2:9092,EXTERNAL://localhost:19093
+    volumes:
+      - kafka2-data:/var/lib/kafka/data
+
+  kafka3:
+    <<: *kafka-common
+    container_name: netlog-kafka3
+    ports:
+      - "19094:19094"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka3:9092,EXTERNAL://localhost:19094
+    volumes:
+      - kafka3-data:/var/lib/kafka/data
+
+  # Creates the topic once the brokers are up, then exits. Six partitions so
+  # the consumer group can hold up to six members; replication factor 3 and
+  # min.insync.replicas 2 so a write with acks=all survives losing one broker.
+  kafka-init:
+    image: apache/kafka:4.1.0
+    container_name: netlog-kafka-init
+    depends_on:
+      kafka1: {condition: service_healthy}
+      kafka2: {condition: service_healthy}
+      kafka3: {condition: service_healthy}
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command:
+      - --bootstrap-server
+      - kafka1:9092
+      - --create
+      - --if-not-exists
+      - --topic
+      - bgl-raw
+      - --partitions
+      - "6"
+      - --replication-factor
+      - "3"
+      - --config
+      - min.insync.replicas=2
+
+  opensearch:
+    image: opensearchproject/opensearch:2.19.3
+    container_name: netlog-opensearch
+    environment:
+      - discovery.type=single-node
+      - cluster.name=netlog-stream
+      - node.name=opensearch
+      # No TLS, no users, no roles. The sink talks plain HTTP on localhost.
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+      nofile: {soft: 65536, hard: 65536}
+    ports:
+      - "9200:9200"
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  kafka1-data:
+  kafka2-data:
+  kafka3-data:
+  opensearch-data:

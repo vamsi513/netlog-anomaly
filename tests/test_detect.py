@@ -10,6 +10,7 @@ import pytest
 from netlog_anomaly.detect import (
     IsolationForestDetector,
     ZScoreBaseline,
+    ZScoreStatistics,
     _best_f1_threshold,
     severity_rule,
 )
@@ -103,6 +104,49 @@ def test_zscore_survives_a_constant_feature() -> None:
 def test_zscore_requires_fit_before_scoring() -> None:
     with pytest.raises(RuntimeError, match="fit must be called"):
         ZScoreBaseline().predict(np.zeros((2, 2)))
+
+
+def test_zscore_statistics_round_trip_reproduces_the_predictions() -> None:
+    """A rebuilt baseline must score identically to the fitted one.
+
+    Streaming mode scores from a stored copy of these statistics, so a
+    round trip that changed a single prediction would make the stream and the
+    batch run disagree for a reason no test downstream could explain.
+    """
+    x_train = rows(*(quiet_row(event_count=10.0 + i) for i in range(20)))
+    y_train = np.zeros(20, dtype=bool)
+    y_train[-1] = True
+    x_test = rows(quiet_row(event_count=10.0), quiet_row(event_count=900.0))
+
+    fitted = ZScoreBaseline().fit(x_train, y_train)
+    rebuilt = ZScoreBaseline.from_statistics(fitted.statistics())
+
+    assert rebuilt.threshold == fitted.threshold
+    assert rebuilt.decision_scores(x_test).tolist() == fitted.decision_scores(x_test).tolist()
+    assert rebuilt.predict(x_test).tolist() == fitted.predict(x_test).tolist()
+
+
+def test_zscore_statistics_need_a_fit_first() -> None:
+    with pytest.raises(RuntimeError, match="fit must be called"):
+        ZScoreBaseline().statistics()
+
+
+def test_zscore_rejects_statistics_of_unequal_length() -> None:
+    with pytest.raises(ValueError, match="means but"):
+        ZScoreBaseline.from_statistics(ZScoreStatistics(mean=(1.0, 2.0), std=(1.0,), threshold=1.0))
+
+
+def test_zscore_rejects_empty_statistics() -> None:
+    with pytest.raises(ValueError, match="no features"):
+        ZScoreBaseline.from_statistics(ZScoreStatistics(mean=(), std=(), threshold=1.0))
+
+
+def test_zscore_rejects_a_zero_deviation() -> None:
+    """fit() replaces a zero deviation with one, so a stored zero is damage."""
+    with pytest.raises(ValueError, match="deviation is zero"):
+        ZScoreBaseline.from_statistics(
+            ZScoreStatistics(mean=(1.0, 2.0), std=(1.0, 0.0), threshold=1.0)
+        )
 
 
 def test_best_threshold_separates_a_clean_split() -> None:

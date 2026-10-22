@@ -1,5 +1,6 @@
 -r requirements.txt
 -r requirements-api.txt
+-r requirements-stream.txt
 pytest==8.4.2
 ruff==0.14.0
 
