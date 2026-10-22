@@ -192,9 +192,12 @@ class WindowConsumer:
         self._partitions_seen: set[int] = set()
         self._first_record_at: float | None = None
         self._last_work_at: float | None = None
-        self._first_record_wall: float | None = None
-        self._last_work_wall: float | None = None
         self._drain_seconds = 0.0
+        # Fixed offset from the monotonic clock to the wall clock, sampled
+        # once. Durations are measured on the monotonic clock, which cannot
+        # jump; the offset turns them into wall clock instants so several
+        # members on one machine can be placed on a common timeline.
+        self._wall_offset = time.time() - time.monotonic()
 
     # Rebalance -------------------------------------------------------------
 
@@ -248,12 +251,10 @@ class WindowConsumer:
                     last_record = time.monotonic()
                     if self._first_record_at is None:
                         self._first_record_at = last_record
-                        self._first_record_wall = time.time()
                     for message in healthy:
                         self._absorb(message)
                     self._flush()
                     self._last_work_at = time.monotonic()
-                    self._last_work_wall = time.time()
                 elif time.monotonic() - last_record > idle_timeout:
                     break
 
@@ -273,10 +274,18 @@ class WindowConsumer:
             commit_conflicts=self._commit_conflicts,
             elapsed_seconds=time.monotonic() - started,
             processing_seconds=self._processing_seconds(),
-            first_record_at=self._first_record_wall,
-            last_work_at=self._last_work_wall,
+            first_record_at=self._wall(self._first_record_at),
+            last_work_at=self._wall(
+                None if self._last_work_at is None else self._last_work_at + self._drain_seconds
+            ),
             partitions_seen=tuple(sorted(self._partitions_seen)),
         )
+
+    def _wall(self, moment: float | None) -> float | None:
+        """A monotonic reading as a wall clock instant, or None."""
+        if moment is None:
+            return None
+        return moment + self._wall_offset
 
     def _processing_seconds(self) -> float:
         if self._first_record_at is None or self._last_work_at is None:
@@ -386,9 +395,11 @@ class WindowConsumer:
         self._flush(drain=True)
         # Counted on its own rather than by moving _last_work_at forward: that
         # would swallow the idle wait that ran between the two.
+        # Counted on its own rather than by moving _last_work_at forward: that
+        # would swallow the idle wait that ran between the two, and the idle
+        # wait is not work. The reported last-work instant is the last batch
+        # plus this, so the drain still counts and the waiting does not.
         self._drain_seconds = time.monotonic() - started
-        if self._first_record_wall is not None:
-            self._last_work_wall = time.time()
         if self._late_events:
             self._log(f"{self._late_events} late events, none folded into a written window")
 
