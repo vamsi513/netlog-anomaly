@@ -4,17 +4,21 @@ python -m netlog_anomaly.streaming create-topic
 python -m netlog_anomaly.streaming produce data/BGL.log --limit 200000
 python -m netlog_anomaly.streaming export-stats
 python -m netlog_anomaly.streaming consume --member c1
+python -m netlog_anomaly.streaming measure --mode throughput --limit 1000000
 """
 
 from __future__ import annotations
 
 import argparse
+import statistics
 import sys
+import tempfile
 from pathlib import Path
 
 from netlog_anomaly import db
 from netlog_anomaly.streaming.config import Settings
 from netlog_anomaly.streaming.consumer import WindowConsumer
+from netlog_anomaly.streaming.measure import RunResult, delay_run, throughput_run
 from netlog_anomaly.streaming.producer import ensure_topic, replay
 from netlog_anomaly.streaming.stats import write_statistics
 
@@ -83,6 +87,58 @@ def _consume(settings: Settings, args: argparse.Namespace) -> None:
     print(f"SUMMARY {stats.as_json()}", flush=True)
 
 
+def _measure(settings: Settings, args: argparse.Namespace) -> None:
+    print(
+        f"Measuring {args.mode} on this machine over the first {args.limit} lines of "
+        f"{args.path}, {args.runs} runs per configuration.\n"
+        "Brokers, OpenSearch, the producer and every consumer share this one machine."
+    )
+    results: dict[int, list[RunResult]] = {}
+    with tempfile.TemporaryDirectory(prefix="netlog-measure-") as log_dir:
+        for members in args.members:
+            results[members] = []
+            for run in range(1, args.runs + 1):
+                print(f"\n{args.mode}, {members} consumer(s), run {run} of {args.runs}")
+                if args.mode == "throughput":
+                    result = throughput_run(settings, args.path, args.limit, members, Path(log_dir))
+                else:
+                    result = delay_run(
+                        settings,
+                        args.path,
+                        args.limit,
+                        members,
+                        Path(log_dir),
+                        target_seconds=args.target_seconds,
+                    )
+                results[members].append(result)
+                print(
+                    f"  records {result.records}, windows {result.windows}, "
+                    f"span {result.span_seconds:.2f}s, "
+                    f"{result.events_per_second:.0f} events/s, "
+                    f"delay median {result.delay_median_ms:.0f} ms, "
+                    f"p95 {result.delay_p95_ms:.0f} ms, "
+                    f"late {result.late_events}, commit conflicts {result.commit_conflicts}"
+                )
+
+    print(f"\nMedian of {args.runs} runs, one machine:")
+    header = (
+        f"{'consumers':>9}  {'events/s':>10}  {'span s':>8}  "
+        f"{'delay med ms':>12}  {'delay p95 ms':>12}  {'windows':>8}"
+    )
+    print(header)
+    print("-" * len(header))
+    for members in args.members:
+        runs = results[members]
+        print(
+            f"{members:>9}  "
+            f"{statistics.median(r.events_per_second for r in runs):>10.0f}  "
+            f"{statistics.median(r.span_seconds for r in runs):>8.2f}  "
+            f"{statistics.median(r.delay_median_ms for r in runs):>12.0f}  "
+            f"{statistics.median(r.delay_p95_ms for r in runs):>12.0f}  "
+            f"{statistics.median(r.windows for r in runs):>8.0f}"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="netlog-anomaly-stream", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -124,6 +180,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     consume.add_argument("--quiet", action="store_true")
 
+    measure = subparsers.add_parser(
+        "measure", help="Time the pipeline on this machine with 1, 2 and 3 consumers."
+    )
+    measure.add_argument("path", type=Path, nargs="?", default=Path("data/BGL.log"))
+    measure.add_argument("--mode", choices=("throughput", "delay"), default="throughput")
+    measure.add_argument("--limit", type=int, default=1_000_000)
+    measure.add_argument("--runs", type=int, default=3)
+    measure.add_argument("--members", type=int, nargs="+", default=[1, 2, 3])
+    measure.add_argument(
+        "--target-seconds",
+        type=float,
+        default=20.0,
+        help="Delay mode only: how long the paced replay should take.",
+    )
+
     stats = subparsers.add_parser(
         "export-stats", help="Fit the z-score on the batch training windows and store it."
     )
@@ -146,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
         _produce(settings, args)
     elif args.command == "consume":
         _consume(settings, args)
+    elif args.command == "measure":
+        _measure(settings, args)
     elif args.command == "export-stats":
         _export_stats(settings, args)
     return 0

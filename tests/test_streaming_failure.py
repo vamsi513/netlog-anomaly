@@ -21,13 +21,8 @@ member that stops without warning.
 
 from __future__ import annotations
 
-import json
-import os
 import signal
-import subprocess
-import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
@@ -41,6 +36,7 @@ from streaming_helpers import (
 )
 
 from netlog_anomaly.streaming.config import Settings
+from netlog_anomaly.streaming.measure import start_member
 from netlog_anomaly.streaming.producer import replay
 from netlog_anomaly.streaming.sink import client
 
@@ -52,60 +48,6 @@ IDLE_TIMEOUT = 25.0
 # margin before their own idle timeout ends their run.
 START_DEADLINE = 60.0
 FINISH_DEADLINE = 300.0
-
-
-@dataclass
-class Member:
-    """One consumer subprocess and the log it is writing."""
-
-    name: str
-    process: subprocess.Popen[bytes]
-    log_path: Path
-
-    def text(self) -> str:
-        try:
-            return self.log_path.read_text(encoding="utf-8", errors="replace")
-        except FileNotFoundError:
-            return ""
-
-    def assigned(self) -> bool:
-        return "assigned partitions" in self.text()
-
-    def summary(self) -> dict[str, object] | None:
-        for line in reversed(self.text().splitlines()):
-            if line.startswith("SUMMARY "):
-                return json.loads(line.removeprefix("SUMMARY "))
-        return None
-
-
-def start_member(name: str, group: str, topic: str, index: str, log_dir: Path) -> Member:
-    log_path = log_dir / f"{name}.log"
-    handle = log_path.open("wb")
-    environment = dict(os.environ)
-    environment["PYTHONUNBUFFERED"] = "1"
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "netlog_anomaly.streaming",
-            "consume",
-            "--member",
-            name,
-            "--group",
-            group,
-            "--topic",
-            topic,
-            "--index",
-            index,
-            "--idle-timeout",
-            str(IDLE_TIMEOUT),
-        ],
-        stdout=handle,
-        stderr=subprocess.STDOUT,
-        env=environment,
-        cwd=Path(__file__).resolve().parents[1],
-    )
-    return Member(name=name, process=process, log_path=log_path)
 
 
 def indexed_count(settings: Settings, index: str) -> int:
@@ -129,7 +71,14 @@ def test_killing_a_consumer_loses_no_window(
     assert produced.published > 0
 
     members = [
-        start_member(f"m{index}", stream_group, stream_topic, stream_index, tmp_path)
+        start_member(
+            f"m{index}",
+            stream_group,
+            stream_topic,
+            stream_index,
+            tmp_path,
+            idle_timeout=IDLE_TIMEOUT,
+        )
         for index in range(1, MEMBERS + 1)
     ]
 
@@ -168,9 +117,7 @@ def test_killing_a_consumer_loses_no_window(
             member.process.wait(timeout=FINISH_DEADLINE)
     finally:
         for member in members:
-            if member.process.poll() is None:
-                member.process.kill()
-                member.process.wait(timeout=30)
+            member.kill()
 
     logs = "\n".join(f"--- {m.name} ---\n{m.text()}" for m in members)
     for member in survivors:
