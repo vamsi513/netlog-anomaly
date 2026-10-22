@@ -1,0 +1,17 @@
+# Streaming mode: the Kafka client and the OpenSearch client. Separate from
+# requirements.txt so the batch pipeline and its tests keep running without a
+# Kafka or an OpenSearch stack.
+#
+# Direct dependencies
+confluent-kafka==2.16.0
+opensearch-py==3.2.0
+
+# Transitive, pinned for reproducibility
+certifi==2026.7.22
+charset-normalizer==3.5.2
+Events==0.5
+opensearch-protobufs==1.2.0
+python-dateutil==3.0.0
+requests==2.34.2
+six==1.17.0
+urllib3==2.8.0
