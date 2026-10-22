@@ -42,6 +42,19 @@ from netlog_anomaly.streaming.windows import WindowAggregator, window_start
 
 LATE_EVENTS_LOGGED = 20
 
+# A commit rejected for one of these reasons means the group moved on while the
+# batch was being processed: the member's generation is stale, or a rebalance is
+# under way. The offsets simply were not accepted, so the records stay unread
+# for whoever owns the partition next. Nothing is lost and the windows they feed
+# are rebuilt and rewritten over the same document ids, so the run continues.
+REBALANCE_COMMIT_ERRORS = frozenset(
+    {
+        KafkaError.ILLEGAL_GENERATION,
+        KafkaError.REBALANCE_IN_PROGRESS,
+        KafkaError.UNKNOWN_MEMBER_ID,
+    }
+)
+
 
 def consumer_config(settings: Settings, group_id: str | None = None) -> dict[str, Any]:
     """Manual commits, cooperative rebalancing, read from the beginning.
@@ -100,6 +113,7 @@ class ConsumeStats:
     windows_written: int
     bulk_writes: int
     late_events: int
+    commit_conflicts: int
     elapsed_seconds: float
     processing_seconds: float
     partitions_seen: tuple[int, ...]
@@ -128,6 +142,7 @@ class ConsumeStats:
                 "windows_written": self.windows_written,
                 "bulk_writes": self.bulk_writes,
                 "late_events": self.late_events,
+                "commit_conflicts": self.commit_conflicts,
                 "elapsed_seconds": round(self.elapsed_seconds, 4),
                 "processing_seconds": round(self.processing_seconds, 4),
                 "events_per_second": round(self.events_per_second, 1),
@@ -167,6 +182,7 @@ class WindowConsumer:
         self._bulk_writes = 0
         self._late_events = 0
         self._late_logged = 0
+        self._commit_conflicts = 0
         self._partitions_seen: set[int] = set()
         self._first_record_at: float | None = None
         self._last_work_at: float | None = None
@@ -244,6 +260,7 @@ class WindowConsumer:
             windows_written=self._windows_written,
             bulk_writes=self._bulk_writes,
             late_events=self._late_events,
+            commit_conflicts=self._commit_conflicts,
             elapsed_seconds=time.monotonic() - started,
             processing_seconds=self._processing_seconds(),
             partitions_seen=tuple(sorted(self._partitions_seen)),
@@ -329,8 +346,15 @@ class WindowConsumer:
             for partition, state in self._states.items()
             if (offset := state.safe_commit_offset()) is not None
         ]
-        if offsets:
+        if not offsets:
+            return
+        try:
             self.consumer.commit(offsets=offsets, asynchronous=False)
+        except KafkaException as exc:
+            if exc.args[0].code() not in REBALANCE_COMMIT_ERRORS:
+                raise
+            self._commit_conflicts += 1
+            self._log(f"commit rejected during a rebalance: {exc.args[0].name()}")
 
     def _flush(self, drain: bool = False) -> None:
         """Write the windows this batch completed, then commit.

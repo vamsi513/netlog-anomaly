@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from opensearchpy import OpenSearch, helpers
+from opensearchpy.exceptions import RequestError
 
 from netlog_anomaly.streaming.config import Settings
 from netlog_anomaly.streaming.scoring import ScoredWindow
@@ -89,9 +90,19 @@ def client(settings: Settings) -> OpenSearch:
 
 
 def ensure_index(os_client: OpenSearch, index: str) -> None:
-    """Create the index with its mapping if it does not exist."""
-    if not os_client.indices.exists(index=index):
+    """Create the index with its mapping if it does not exist.
+
+    Checking and creating are two calls, so several consumers starting at once
+    will race here and all but one will be told the index already exists. That
+    is the outcome they wanted, so it is not an error.
+    """
+    if os_client.indices.exists(index=index):
+        return
+    try:
         os_client.indices.create(index=index, body=INDEX_SETTINGS)
+    except RequestError as exc:
+        if exc.error != "resource_already_exists_exception":
+            raise
 
 
 def document(record: IndexedWindow, indexed_at: datetime | None = None) -> dict[str, object]:

@@ -5,99 +5,25 @@ else: batch aggregates with one SQL GROUP BY over a loaded table, streaming
 folds events into per partition state as they arrive and closes each window on
 a watermark. Agreeing on every window of a fixed slice is the only evidence
 that the second path reproduces the first.
-
-The comparison is restricted to the windows the slice completes. A slice cut at
-a line number ends in the middle of a window, and the batch table counts that
-window over the whole file, so comparing it would be comparing different
-inputs. A window is complete when no line of the file outside the slice falls
-inside it, which is asked of the database rather than assumed from the log
-being in time order.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-
 import psycopg
+from streaming_helpers import (
+    SOURCE_FILE,
+    WINDOW_SECONDS,
+    compare,
+    complete_windows,
+    fetch_batch,
+    fetch_streamed,
+)
 
 from netlog_anomaly.streaming.config import Settings
 from netlog_anomaly.streaming.consumer import WindowConsumer
 from netlog_anomaly.streaming.producer import replay
-from netlog_anomaly.streaming.sink import client
 
 SLICE_LINES = 200_000
-WINDOW_SECONDS = 60
-SOURCE_FILE = "BGL.log"
-
-
-@dataclass(frozen=True, slots=True)
-class BatchWindow:
-    """One window as the batch tables have it."""
-
-    event_count: int
-    is_anomalous: bool
-    last_line: int
-
-
-def fetch_streamed(settings: Settings, index: str) -> dict[str, dict[str, object]]:
-    """Every document in the index, keyed by document id."""
-    os_client = client(settings)
-    os_client.indices.refresh(index=index)
-    documents: dict[str, dict[str, object]] = {}
-    response = os_client.search(
-        index=index, body={"query": {"match_all": {}}, "sort": ["_doc"]}, size=1000, scroll="2m"
-    )
-    scroll_id = response.get("_scroll_id")
-    try:
-        while True:
-            hits = response["hits"]["hits"]
-            if not hits:
-                break
-            for hit in hits:
-                documents[hit["_id"]] = hit["_source"]
-            response = os_client.scroll(scroll_id=scroll_id, scroll="2m")
-            scroll_id = response.get("_scroll_id")
-    finally:
-        if scroll_id:
-            os_client.clear_scroll(scroll_id=scroll_id)
-    return documents
-
-
-def fetch_batch(conn: psycopg.Connection, lo_epoch: int, hi_epoch: int) -> dict[int, BatchWindow]:
-    """The batch windows over an epoch range, with the last line each contains.
-
-    event_count and is_anomalous come from window_features, the table the batch
-    pipeline writes. last_line comes from log_events and is only used to decide
-    which windows the slice completed.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            WITH sliced AS (
-                SELECT div(epoch, %(w)s) * %(w)s AS ws, max(line_no) AS last_line
-                  FROM log_events
-                 WHERE source_file = %(file)s
-                   AND epoch >= %(lo)s AND epoch < %(hi)s
-                 GROUP BY 1
-            )
-            SELECT s.ws, w.event_count, w.is_anomalous, s.last_line
-              FROM sliced s
-              JOIN window_features w
-                ON w.window_seconds = %(w)s
-               AND w.window_start = to_timestamp(s.ws)
-             ORDER BY s.ws
-            """,
-            {"w": WINDOW_SECONDS, "file": SOURCE_FILE, "lo": lo_epoch, "hi": hi_epoch},
-        )
-        return {
-            int(ws): BatchWindow(
-                event_count=int(event_count),
-                is_anomalous=bool(is_anomalous),
-                last_line=int(last_line),
-            )
-            for ws, event_count, is_anomalous, last_line in cur.fetchall()
-        }
 
 
 def test_streamed_windows_match_the_batch_windows(
@@ -128,52 +54,25 @@ def test_streamed_windows_match_the_batch_windows(
     streamed = fetch_streamed(stream_settings, stream_index)
     assert len(streamed) == consumed.windows_written
 
-    # The document id is the window start, so the keys alone place every
-    # streamed window on the grid.
-    streamed_by_start = {
-        int(datetime.fromisoformat(document_id).timestamp()): source
-        for document_id, source in streamed.items()
-    }
-    starts = sorted(streamed_by_start)
-    batch = fetch_batch(batch_conn, starts[0], starts[-1] + WINDOW_SECONDS)
-
-    complete = {ws: window for ws, window in batch.items() if window.last_line <= SLICE_LINES}
-    partial = sorted(set(batch) - set(complete))
-
-    # Every complete window must have been streamed, and no streamed window
-    # may be missing from the batch tables.
-    missing = sorted(set(complete) - set(streamed_by_start))
-    unexpected = sorted(set(streamed_by_start) - set(batch))
-    assert not missing, f"{len(missing)} complete batch windows were never streamed: {missing[:5]}"
-    assert not unexpected, f"{len(unexpected)} streamed windows are not in the batch tables"
-
-    mismatches: list[str] = []
-    for ws in sorted(complete):
-        document = streamed_by_start[ws]
-        expected = complete[ws]
-        if int(document["event_count"]) != expected.event_count:
-            mismatches.append(
-                f"{document['window_start']} event_count "
-                f"stream={document['event_count']} batch={expected.event_count}"
-            )
-        if bool(document["is_anomalous"]) != expected.is_anomalous:
-            mismatches.append(
-                f"{document['window_start']} is_anomalous "
-                f"stream={document['is_anomalous']} batch={expected.is_anomalous}"
-            )
+    complete, partial = complete_windows(batch_conn, streamed, SLICE_LINES)
+    missing, unexpected, mismatches = compare(streamed, complete)
 
     print(
         f"\nparity over the first {SLICE_LINES} lines of {SOURCE_FILE}: "
         f"{len(complete)} complete windows compared, {len(mismatches)} mismatches, "
-        f"{len(partial)} partial windows excluded, "
-        f"{consumed.late_events} late events"
+        f"{len(missing)} missing, {len(unexpected)} unexpected, "
+        f"{len(partial)} partial windows excluded, {consumed.late_events} late events"
+    )
+    assert not missing, f"{len(missing)} complete batch windows were never streamed: {missing[:5]}"
+    assert set(unexpected) <= set(partial), (
+        f"streamed windows that are neither complete nor partial: "
+        f"{sorted(set(unexpected) - set(partial))[:5]}"
     )
     assert not mismatches, "\n".join(mismatches)
     assert len(complete) > 100, f"only {len(complete)} windows compared; the slice is too small"
 
 
 def test_only_the_cut_window_is_incomplete(
-    stream_settings: Settings,
     bgl_log: object,
     batch_conn: psycopg.Connection,
 ) -> None:
