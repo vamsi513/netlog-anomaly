@@ -2,6 +2,7 @@
 
 python -m netlog_anomaly.streaming create-topic
 python -m netlog_anomaly.streaming produce data/BGL.log --limit 200000
+python -m netlog_anomaly.streaming export-stats
 """
 
 from __future__ import annotations
@@ -10,8 +11,10 @@ import argparse
 import sys
 from pathlib import Path
 
+from netlog_anomaly import db
 from netlog_anomaly.streaming.config import Settings
 from netlog_anomaly.streaming.producer import ensure_topic, replay
+from netlog_anomaly.streaming.stats import write_statistics
 
 
 def _create_topic(settings: Settings, args: argparse.Namespace) -> None:
@@ -44,6 +47,24 @@ def _produce(settings: Settings, args: argparse.Namespace) -> None:
     print(f"  events/s   : {stats.events_per_second:.0f}")
 
 
+def _export_stats(settings: Settings, args: argparse.Namespace) -> None:
+    path = args.out or settings.stats_path
+    with db.connect(args.database_url) as conn:
+        statistics = write_statistics(
+            conn,
+            path,
+            window_seconds=args.window_seconds,
+            train_fraction=args.train_fraction,
+            source=args.source,
+        )
+    print(f"Wrote {path}")
+    print(f"  features      : {', '.join(statistics.feature_names)}")
+    print(f"  train windows : {statistics.n_train_windows}")
+    print(f"  train cutoff  : {statistics.train_cutoff}")
+    print(f"  max|z| cut    : {statistics.zscore.threshold:.4f}")
+    print(f"  train F1      : {statistics.train_f1:.4f}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="netlog-anomaly-stream", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -64,6 +85,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Multiple of real time; 0 publishes as fast as the cluster accepts.",
     )
 
+    stats = subparsers.add_parser(
+        "export-stats", help="Fit the z-score on the batch training windows and store it."
+    )
+    stats.add_argument("--out", type=Path, default=None)
+    stats.add_argument("--database-url", default=None)
+    stats.add_argument("--window-seconds", type=int, default=60)
+    stats.add_argument("--train-fraction", type=float, default=0.7)
+    stats.add_argument("--source", default="BGL.log")
+
     return parser
 
 
@@ -75,6 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         _create_topic(settings, args)
     elif args.command == "produce":
         _produce(settings, args)
+    elif args.command == "export-stats":
+        _export_stats(settings, args)
     return 0
 
 

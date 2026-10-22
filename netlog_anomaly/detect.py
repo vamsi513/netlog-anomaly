@@ -31,6 +31,20 @@ def severity_rule(split: Split, x: np.ndarray) -> np.ndarray:
     return (fatal + failure) > 0
 
 
+@dataclass(frozen=True, slots=True)
+class ZScoreStatistics:
+    """The whole fitted state of a ZScoreBaseline, apart from the object.
+
+    Separable so the baseline can be fitted once over the training windows and
+    then rebuilt elsewhere from a stored copy. Streaming mode needs that: it
+    scores one window at a time, with no training set in reach.
+    """
+
+    mean: tuple[float, ...]
+    std: tuple[float, ...]
+    threshold: float
+
+
 @dataclass
 class ZScoreBaseline:
     """Threshold on the largest absolute z-score across all features.
@@ -64,6 +78,37 @@ class ZScoreBaseline:
 
     def predict(self, x: np.ndarray) -> np.ndarray:
         return self.decision_scores(x) >= self.threshold
+
+    def statistics(self) -> ZScoreStatistics:
+        """The fitted means, deviations and threshold, ready to store."""
+        if self._mean is None or self._std is None:
+            raise RuntimeError("fit must be called before reading statistics")
+        return ZScoreStatistics(
+            mean=tuple(float(value) for value in self._mean),
+            std=tuple(float(value) for value in self._std),
+            threshold=self.threshold,
+        )
+
+    @classmethod
+    def from_statistics(cls, statistics: ZScoreStatistics) -> ZScoreBaseline:
+        """Rebuild a fitted baseline from stored statistics.
+
+        The deviations are taken as stored rather than re-derived: fit()
+        already replaced any zero with one, and repeating that here would hide
+        a statistics file that had been truncated or corrupted.
+        """
+        if len(statistics.mean) != len(statistics.std):
+            raise ValueError(f"{len(statistics.mean)} means but {len(statistics.std)} deviations")
+        if not statistics.mean:
+            raise ValueError("statistics carry no features")
+        if any(value == 0.0 for value in statistics.std):
+            raise ValueError("a stored standard deviation is zero")
+
+        baseline = cls()
+        baseline._mean = np.asarray(statistics.mean, dtype=np.float64)
+        baseline._std = np.asarray(statistics.std, dtype=np.float64)
+        baseline.threshold = statistics.threshold
+        return baseline
 
 
 def _best_f1_threshold(scores: np.ndarray, y: np.ndarray) -> float:
