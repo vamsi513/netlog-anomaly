@@ -323,6 +323,163 @@ The page shows the timeline on a **log scale**: event counts per window run
 from 1 to over 16,000 and most windows hold a single event, so a linear axis
 renders nearly everything as a flat line.
 
+## Streaming mode
+
+The same 60 second windows, built from a live Kafka stream instead of a SQL
+`GROUP BY`, scored and indexed in OpenSearch. `docs/STREAMING.md` explains every
+design decision and why the alternatives were rejected; this section is how to
+run it and what it measured.
+
+```bash
+# Stack: three Kafka brokers in KRaft mode plus one OpenSearch node
+docker compose -f docker-compose.stream.yml up -d --wait
+
+pip install -r requirements-stream.txt
+export NETLOG_KAFKA_BOOTSTRAP=localhost:19092,localhost:19093,localhost:19094
+export NETLOG_OPENSEARCH_URL=http://localhost:9200
+
+# Scoring statistics, refitted from the batch training windows. A copy is
+# committed, so this is only needed after reloading a different dataset.
+export NETLOG_DATABASE_URL=postgresql://localhost:5432/netlog
+python -m netlog_anomaly.streaming export-stats
+
+# Replay, then window, score and index. Two shells, or background the first.
+python -m netlog_anomaly.streaming produce data/BGL.log --limit 1000000
+python -m netlog_anomaly.streaming consume --member c1 --idle-timeout 8
+```
+
+`--speed 60` on `produce` paces the replay at 60 times real time instead of
+publishing as fast as the cluster accepts. Running `consume` several times with
+the same `--group` spreads the six partitions across the members.
+
+### Example queries
+
+Against the index after the replay above (2,793 windows, 823 of them flagged,
+spanning 23 days).
+
+```bash
+# 1. Top flagged windows, worst z-score first
+curl -s localhost:9200/netlog-windows/_search -H 'Content-Type: application/json' -d '{
+  "size": 10,
+  "query": { "term": { "flagged": true } },
+  "sort": [ { "zscore": "desc" } ],
+  "_source": ["window_start","event_count","distinct_nodes","error_rate","zscore"]
+}'
+```
+
+The worst window is `2005-06-14T16:54:00+00:00`: 4,122 events across 4,122
+distinct nodes, every one of them `FATAL`, at a z-score of 16.09.
+
+```bash
+# 2. Windows per day, and how many of them were flagged
+curl -s localhost:9200/netlog-windows/_search -H 'Content-Type: application/json' -d '{
+  "size": 0,
+  "aggs": { "per_day": {
+    "date_histogram": { "field": "window_start", "calendar_interval": "day", "min_doc_count": 1 },
+    "aggs": { "flagged": { "filter": { "term": { "flagged": true } } } }
+  } }
+}'
+```
+
+```bash
+# 3. Windows above an event count
+curl -s localhost:9200/netlog-windows/_count -H 'Content-Type: application/json' -d '{
+  "query": { "range": { "event_count": { "gte": 1000 } } }
+}'
+```
+
+296 of the 2,793 windows hold 1,000 events or more.
+
+### Measured results
+
+One machine: ten cores, 16 GB, with the three brokers, OpenSearch, the producer
+and every consumer sharing it. **This is not a cluster.** Treat the numbers as
+evidence that the pipeline is correct under concurrency, not as a scaling curve.
+
+Each configuration ran 3 times over the same 1,000,000 lines (999,995
+published, 5 rejected by the parser). Medians below. Every one of the 18 runs
+produced the same 2,793 windows, which matters more than the rates.
+
+Throughput, with the whole slice published before any consumer starts, so the
+group is draining a backlog:
+
+| Consumers | events/s | Work span (s) | Windows | Late events |
+|---|---|---|---|---|
+| 1 | 118,607 | 8.43 | 2,793 | 0 |
+| 2 | 102,888 | 9.75 | 2,793 | 0 |
+| 3 | 135,637 | 7.39 | 2,793 | 0 |
+
+Three consumers beat one by about 14%, and two are slower than one. On a single
+machine that is roughly what you would expect, since every extra consumer
+process competes for the same cores and disk as the brokers and OpenSearch. The
+two consumer dip reproduced across all three runs rather than being noise, and
+its cause was not isolated, so no explanation is offered here.
+
+End to end delay, with the consumers started first and the slice then published
+at a pace they keep up with. Delay is measured per window as the gap between
+the moment its newest event was published and the moment its document was
+written:
+
+| Consumers | Delay median (ms) | Delay p95 (ms) | Windows | Late events |
+|---|---|---|---|---|
+| 1 | 359 | 1,163 | 2,793 | 0 |
+| 2 | 168 | 1,044 | 2,793 | 0 |
+| 3 | 201 | 1,052 | 2,793 | 0 |
+
+The paced runs all publish at about 48,500 events/s, which is a throttle this
+measurement sets and not a capacity result. Measuring delay against a backlog
+instead would mostly measure how long records sat in a queue: in the throughput
+runs above, the same windows show median delays of 5.2 to 9.2 seconds.
+
+Correctness, all against the real services with no mocks:
+
+| Check | Result |
+|---|---|
+| Parity against the batch `window_features` rows | 586 complete windows compared on event count and anomaly flag, **0 mismatches**, 1 partial window excluded |
+| Three consumers, one killed with `SIGKILL` mid run | 2,792 complete windows compared, **0 lost, 0 duplicate window starts, 0 field mismatches** |
+| Same topic range delivered twice | 244 documents before and after, all 244 rewritten in place |
+| Window keying | 587 windows over a 200,000 line slice, **none split across partitions** |
+| Idempotency broken on purpose (random document ids) | Parity, failure and duplicate tests all fail; document count doubles from 244 to 488 and all 244 window starts report as duplicated |
+
+Three brokers did run on this machine, so the single broker fallback was not
+needed. Observed on an idle stack: 325.1, 335.1 and 333.9 MiB for the brokers
+and 1.484 GiB for OpenSearch, about 2.46 GiB against the 7.748 GiB the Docker
+VM has.
+
+### Limitations
+
+* **One machine, not a cluster.** Three brokers in one Docker VM share a disk
+  and a page cache, so replication factor 3 buys correctness testing here, not
+  the durability it would buy on three machines.
+* **State is held in memory.** A consumer's open windows live in its process. A
+  crash loses them, and they are only rebuilt because offsets are never
+  committed past a record whose window is still open, so the next owner re-reads
+  those records. There is no state store and no checkpoint: recovery is replay.
+* **At-least-once delivery with idempotent writes, not exactly-once.** Nothing
+  prevents a record being delivered twice. The document id is the window start,
+  so a duplicate rewrites its document instead of adding one. Making it
+  exactly-once would need the OpenSearch write and the Kafka offset commit to be
+  one atomic operation, which they cannot be.
+* **No schema registry.** The topic carries raw log lines and the consumer
+  parses them itself. Nothing validates what a producer publishes, and a change
+  to the line format would be discovered by the parser rejecting lines.
+* **No authentication anywhere.** Every Kafka listener is `PLAINTEXT` and
+  OpenSearch runs with its security plugin disabled. Local development only.
+* **Late events are counted, not recovered.** With the default allowed lateness
+  of 0 seconds, an event arriving after its window closed is counted, attributed
+  to that window and reported, but it does not change the document that was
+  already written. Raising `NETLOG_STREAM_ALLOWED_LATENESS` trades delay on every
+  window for tolerance. Across every measured run the late count was 0, because
+  the producer publishes in file order; `tests/test_streaming_windows.py` drives
+  the path directly rather than relying on the replay to exercise it.
+* **Skew is structural.** Keying by window puts one busy minute on one
+  partition. The six partitions took 37,499 to 44,809 events over a 200,000 line
+  slice, a 1.58x spread, and a window too large for one consumer has nowhere to
+  go.
+* **The integration tests are not in CI.** GitHub Actions has no Kafka or
+  OpenSearch and does not download the dataset, so those tests skip there. They
+  are run locally against the compose stack.
+
 ## Optional: Airflow DAG
 
 `airflow/dags/netlog_etl.py` sequences the same functions the command line
@@ -357,7 +514,8 @@ above.
 ## CI
 
 `.github/workflows/ci.yml` has two jobs. The first runs ruff, the full pytest
-suite of 169 tests against a real Postgres service container, and a CLI smoke
+suite of 205 tests against a real Postgres service container, of which the
+streaming integration tests skip because the runner has no Kafka or OpenSearch, and a CLI smoke
 test over the committed fixtures that loads the same file twice to prove the
 load is idempotent. The second installs the frontend with `npm ci`, which
 installs exactly the lockfile and fails if it disagrees with `package.json`,
