@@ -40,7 +40,7 @@ aggregation and no shuffle.
 Skew. One busy minute of the log is one hot partition, and the load across
 partitions follows the log's own time distribution rather than anything
 balanced. Measured over the first 200,000 lines, the six partitions received
-37,499 / 28,298 / 44,809 / 28,844 / 30,588 / 29,962 events — a 1.58x spread
+37,499 / 28,298 / 44,809 / 28,844 / 30,588 / 29,962 events, a 1.58x spread
 between the lightest and the heaviest. A window too large for one consumer to
 hold also has nowhere else to go, which is a real limit, not a tuning problem.
 
@@ -91,7 +91,7 @@ avoids it.
 
 An event whose window has already been emitted cannot be folded into a result
 that has left the process. Those events are **counted, attributed to the window
-they belonged to, logged as they happen, and reported in the run summary** —
+they belonged to, logged as they happen, and reported in the run summary**,
 never silently dropped, because a silently dropped event is a wrong answer
 nobody can detect. The aggregator exposes `late_events` and
 `late_events_by_window`, each closed window carries its own `late_events`, and
@@ -101,7 +101,7 @@ Over the measured runs of the BGL replay the late count was **0**: the producer
 publishes in file order and the file is close enough to time ordered that,
 with a window key per partition, nothing arrived after its window closed. The
 policy matters for a real feed, not for this replay, and saying the count was
-zero is not the same as saying the path is unexercised —
+zero is not the same as saying the path is unexercised:
 `test_streaming_windows.py` drives it directly.
 
 ### A bounded replay has to end somewhere
@@ -130,9 +130,9 @@ their metrics and per window predictions; there is no serialised estimator in
 the repository and no code that writes one. Rather than add model persistence,
 streaming mode scores with:
 
-* the **severity rule** — flag any window containing a FATAL or FAILURE line,
+* the **severity rule**: flag any window containing a FATAL or FAILURE line,
   the batch function itself; and
-* the **z-score** — the largest absolute z-score across the ten base features,
+* the **z-score**: the largest absolute z-score across the ten base features,
   against means, standard deviations and a threshold exported from the batch
   **training** period only.
 
@@ -209,13 +209,13 @@ instead of quietly creating a second field nobody queries.
   group can only resume from committed offsets if those offsets survived the
   loss of a broker;
 * **one OpenSearch node** (`opensearchproject/opensearch:2.19.3`), single node
-  discovery, 1 GB heap, one shard and no replica — a single node cannot place a
+  discovery, 1 GB heap, one shard and no replica. A single node cannot place a
   replica, and asking for one would leave the index yellow forever.
 
 **Three brokers did run on this machine.** No memory limit was hit, so the
 fallback to one broker was not needed. Observed with `docker stats` on an idle
 stack: 325.1 MiB, 335.1 MiB and 333.9 MiB for the three brokers and 1.484 GiB
-for OpenSearch, against the 7.748 GiB the Docker VM has — about 2.46 GiB in
+for OpenSearch, against the 7.748 GiB the Docker VM has, about 2.46 GiB in
 total. All six partitions reported `Isr: 3` after start up.
 
 Three brokers rather than one so that replication factor 3 with
@@ -247,8 +247,8 @@ another's result.
 A window is only compared where the slice completes it. A slice cut at a line
 number ends in the middle of a window, and the batch table counts that window
 over the whole file, so comparing it would be comparing different inputs. Which
-windows are complete is asked of the database — no line of the file outside the
-slice falls inside the window — rather than assumed from the log being in time
+windows are complete is asked of the database (no line of the file outside the
+slice falls inside the window) rather than assumed from the log being in time
 order.
 
 ## Configuration
